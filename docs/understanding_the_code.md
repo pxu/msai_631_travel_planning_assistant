@@ -9,7 +9,7 @@ dictionary is, skim past the "tiny bit of Python" section.
 If you just want to **see the chatbot work** without reading any code, jump
 to [Trying it yourself](#trying-it-yourself) near the bottom.
 
-## 1. The big picture, in plain English
+## 1. The big picture
 
 The whole project is one conversation loop:
 
