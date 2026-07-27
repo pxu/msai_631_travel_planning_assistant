@@ -96,10 +96,9 @@ a free, temporary GPU in your browser.
      the cells to run.
 
    **Option B — clone from GitHub instead:** open
-   `notebooks/travel_assistant_colab.ipynb`'s first code cell and follow
-   the comments there (`!git clone ...`). This always gets the latest
-   code instead of a point-in-time zip, at the cost of one extra step
-   (editing in the branch name, until PR #1 is merged).
+   `notebooks/travel_assistant_colab.ipynb` and run its `!git clone ...`
+   cell. This always gets the latest code from `main`, instead of a
+   point-in-time zip.
 3. **Run every remaining cell, top to bottom** (`Shift+Enter` on each one,
    or **Runtime → Run all**). The first real run downloads the AI model
    (a couple of minutes) — this only happens once per Colab session.
