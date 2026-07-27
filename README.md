@@ -54,6 +54,7 @@ accordingly:
 ## Project layout
 
 ```
+travel_assistant_project.zip   # ready-to-upload snapshot of this project, for Colab
 travel_assistant/
   state.py    # TravelState TypedDict — the graph's shared state schema
   llm.py      # loads the local model as a LangChain chat model
@@ -71,34 +72,45 @@ This is the easiest way for any team member to try the full chatbot —
 no local Python setup, no GPU of your own required. Google Colab gives you
 a free, temporary GPU in your browser.
 
-1. **Get the code into Colab.** Two ways to do this:
-   - *From GitHub (recommended once this repo is pushed):* go to
-     [colab.research.google.com](https://colab.research.google.com) →
-     **File → Open notebook → GitHub tab** → paste this repo's GitHub URL →
-     open `notebooks/travel_assistant_colab.ipynb`.
-   - *By uploading manually:* download this repo as a ZIP from GitHub
-     (**Code → Download ZIP**), unzip it, then in Colab click the folder
-     icon in the left sidebar and drag in the `travel_assistant/` folder,
-     `requirements.txt`, and `notebooks/travel_assistant_colab.ipynb`.
-2. **Turn on the free GPU.** Menu bar: **Runtime → Change runtime type →
+1. **Turn on the free GPU.** Menu bar: **Runtime → Change runtime type →
    Hardware accelerator → T4 GPU → Save.** (Skipping this step means the
    model runs on CPU only, which is much slower.)
-3. **If you cloned from GitHub**, open the first code cell and replace the
-   placeholder URL in the `!git clone ...` line with this repo's actual
-   URL, then run that cell (the ▶ button on the left of the cell, or
-   `Shift+Enter`). **If you uploaded manually**, skip that cell — just
-   confirm the files show up in the file browser on the left.
-4. **Run every remaining cell, top to bottom** (`Shift+Enter` on each one,
+2. **Get the code into Colab.** Two ways to do this — pick one:
+
+   **Option A — upload the zip (simplest):**
+   - Download `travel_assistant_project.zip` from this repo (on GitHub,
+     click the file → **Download raw file**).
+   - In Colab, click the folder icon in the left sidebar, then the upload
+     icon (a page with an up arrow) near the top of that panel, and select
+     `travel_assistant_project.zip`. It lands in Colab's working directory.
+   - Add a new code cell and run:
+     ```python
+     !unzip -q travel_assistant_project.zip
+     ```
+     (If you have Colab Pro and a terminal panel, running
+     `unzip travel_assistant_project.zip` there does the same thing. Free
+     Colab has no terminal panel, so the cell above is the version that
+     works for everyone.)
+   - Then open `travel_assistant_colab.ipynb` from the file browser (or
+     upload it too, if you only grabbed the zip) so you have the rest of
+     the cells to run.
+
+   **Option B — clone from GitHub instead:** open
+   `notebooks/travel_assistant_colab.ipynb`'s first code cell and follow
+   the comments there (`!git clone ...`). This always gets the latest
+   code instead of a point-in-time zip, at the cost of one extra step
+   (editing in the branch name, until PR #1 is merged).
+3. **Run every remaining cell, top to bottom** (`Shift+Enter` on each one,
    or **Runtime → Run all**). The first real run downloads the AI model
    (a couple of minutes) — this only happens once per Colab session.
-5. **Wait for a public link.** The last cell prints a message ending in
+4. **Wait for a public link.** The last cell prints a message ending in
    something like `Running on public URL: https://xxxxx.gradio.live` —
    click that link to open the chat window in a new tab.
-6. **Chat with it.** Type anything to start (e.g. "hi"), then answer each
+5. **Chat with it.** Type anything to start (e.g. "hi"), then answer each
    question the assistant asks in order (destination, trip length, who's
    traveling, interests, budget). After the fifth answer, it generates and
    shows the full trip plan.
-7. **When you're done**, go to **Runtime → Disconnect and delete runtime**
+6. **When you're done**, go to **Runtime → Disconnect and delete runtime**
    to free up the shared GPU quota for the next team member.
 
 **Troubleshooting:**
@@ -110,6 +122,16 @@ a free, temporary GPU in your browser.
   output — it only appears after the model has finished loading.
 - *The assistant seems to repeat a question:* wait for its question to
   fully finish printing before typing your reply.
+
+**Keeping `travel_assistant_project.zip` up to date:** it's a snapshot,
+not a live link to the code — if you change anything under
+`travel_assistant/`, regenerate it before teammates rely on it again:
+
+```bash
+zip -rq travel_assistant_project.zip . \
+  -x ".git/*" -x ".venv/*" -x "*__pycache__*" -x ".pytest_cache/*" \
+  -x ".idea/*" -x ".claude/*" -x "*.DS_Store" -x "travel_assistant_project.zip"
+```
 
 ## Running locally (logic only, no GPU needed)
 
