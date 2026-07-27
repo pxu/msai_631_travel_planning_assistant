@@ -1,0 +1,9 @@
+langgraph>=0.6
+langchain>=0.3
+langchain-huggingface>=0.1
+transformers>=4.44
+torch
+accelerate
+bitsandbytes; sys_platform == "linux"
+gradio>=4.44
+pytest>=8.0
