@@ -14,22 +14,43 @@ background required.
 ## Architecture
 
 Built with **LangGraph** instead of calling `transformers` directly. The
-conversation is modeled as an explicit `StateGraph` (`travel_assistant/graph.py`):
+conversation is modeled as an explicit `StateGraph` (`travel_assistant/graph.py`)
+with adaptive, extraction-based preference collection rather than a fixed
+sequential questionnaire:
 
 ```
-START -> collect_preferences -> generate_itinerary -> generate_activities
-      -> generate_transportation -> generate_budget -> generate_packing -> END
+START -> collect_initial_request -> extract_preferences -> validate_preferences
+      -[missing fields]-> request_missing_fields -> extract_preferences (loop)
+      -[all collected]-> show_summary -> confirm_preferences
+      -[edit]-> apply_preference_edit -> validate_preferences (loop)
+      -[confirmed]-> generate_itinerary -> generate_activities
+      -> generate_transportation -> generate_budget -> generate_packing -> review_plan
+      -[edit]-> apply_plan_edit -> regenerate_affected -> review_plan (loop)
+      -[confirmed]-> END
 ```
 
-- `collect_preferences` uses LangGraph's `interrupt()` / `Command(resume=...)`
-  human-in-the-loop mechanism to ask one question at a time (destination,
-  trip length, traveler group, interests, budget level) and pause until the
-  user answers — no LLM-driven routing involved, so a small local model only
-  ever has to generate text, never decide what happens next.
+- The user describes their trip in free text ("7-day family trip to Japan,
+  we love food and theme parks, moderate budget"); `extract_preferences`
+  makes one LLM call to pull structured fields out of that message, and
+  `validate_preferences` (plain Python, no LLM call) checks which of the
+  five required fields are still missing.
+- `request_missing_fields` uses LangGraph's `interrupt()` / `Command(resume=...)`
+  human-in-the-loop mechanism to ask only for what's missing, and accepts
+  any number of fields in a single reply — a user can answer everything at
+  once or one detail at a time. No LLM-driven routing is involved anywhere
+  in the graph: conditional edges read plain state (e.g. "is `missing_fields`
+  empty?"), so a small local model only ever has to extract or generate
+  text, never decide what happens next.
+- Before generating anything, `show_summary`/`confirm_preferences` shows a
+  ✅/❓ card of everything collected and lets the user confirm or correct it.
 - Each `generate_*` node calls the LLM once to produce its section.
   The budget estimate combines a deterministic rate-table calculation with
   an LLM-written summary, so the number itself doesn't depend on the model
   getting arithmetic right.
+- After the plan is generated, `review_plan` lets the user request changes
+  (e.g. "increase my budget," "add more outdoor activities"); `apply_plan_edit`
+  figures out which section(s) are affected and `regenerate_affected`
+  reruns only those, leaving the rest of the plan untouched.
 - State and routing are separate from the model, so the same graph works
   with any LangChain chat model dropped into `travel_assistant/llm.py`.
 
@@ -48,8 +69,9 @@ accordingly:
   this loads the same model family's non-quantized weights
   (`unsloth/Llama-3.2-1B-Instruct`) in fp16 directly on the GPU via PyTorch's
   MPS backend. Verified working end-to-end on an Apple M4 Max (64 GB) — the
-  full graph (all 5 preference questions + itinerary/activities/transportation/
-  budget/packing generation) runs locally with no cloud dependency at all.
+  full graph (preference extraction/confirmation + itinerary/activities/
+  transportation/budget/packing generation) runs locally with no cloud
+  dependency at all.
 
 ## Project layout
 
@@ -106,10 +128,12 @@ a free, temporary GPU in your browser.
 4. **Wait for a public link.** The last cell prints a message ending in
    something like `Running on public URL: https://xxxxx.gradio.live` —
    click that link to open the chat window in a new tab.
-5. **Chat with it.** Type anything to start (e.g. "hi"), then answer each
-   question the assistant asks in order (destination, trip length, who's
-   traveling, interests, budget). After the fifth answer, it generates and
-   shows the full trip plan.
+5. **Chat with it.** Describe your trip in your own words to start (e.g.
+   "5-day family trip to Japan, we love food and theme parks, moderate
+   budget") — the assistant extracts what it can and only asks for
+   whatever's still missing. Once everything's collected, it shows a
+   summary card to confirm before generating the full trip plan, and lets
+   you request changes ("increase my budget," "make it 10 days") afterward.
 6. **When you're done**, go to **Runtime → Disconnect and delete runtime**
    to free up the shared GPU quota for the next team member.
 
@@ -120,7 +144,7 @@ a free, temporary GPU in your browser.
   fresh session.
 - *No public link shows up:* scroll to the bottom of the last cell's
   output — it only appears after the model has finished loading.
-- *The assistant seems to repeat a question:* wait for its question to
+- *The assistant seems to repeat its question:* wait for its message to
   fully finish printing before typing your reply.
 
 **Keeping `travel_assistant_project.zip` up to date:** it's a snapshot,
