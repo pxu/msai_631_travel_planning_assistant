@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Corrected Figures 1 and 2</title>
+<style>
+  body{ background:#fff; margin:0; font-family:"Times New Roman", Times, serif; color:#000; }
+  .sheet{ padding:28px; display:inline-block; }
+  .box{
+    border:1px solid #000; background:#fff; padding:7px 14px;
+    text-align:center; font-size:13px; line-height:1.35; border-radius:2px;
+  }
+  .box.round{ border-radius:14px; }
+  .box .hd{ text-decoration:underline; display:block; margin-bottom:3px; }
+  .box ol{ margin:2px 0 0; padding-left:0; list-style:none; }
+  .box ol li{ font-size:12.5px; }
+  .term{ border:1px solid #000; border-radius:22px; padding:6px 26px; font-size:13px; background:#fff; }
+  .arrow{ width:1px; height:22px; background:#000; margin:0 auto; position:relative; }
+  .arrow::after{
+    content:""; position:absolute; bottom:-1px; left:-4px;
+    border-left:4.5px solid transparent; border-right:4.5px solid transparent;
+    border-top:8px solid #000;
+  }
+  .col{ display:flex; flex-direction:column; align-items:center; }
+  /* --- figure 1 layer brackets --- */
+  .f1{ display:grid; grid-template-columns: 300px 34px 150px; align-items:stretch; }
+  .f1 .flow{ grid-column:1; }
+  .f1 .brk{ grid-column:2; position:relative; }
+  .f1 .brk i{
+    position:absolute; left:15px; top:6px; bottom:6px; width:9px;
+    border:1px solid #000; border-left:none;
+  }
+  .f1 .lbl{ grid-column:3; display:flex; align-items:center; font-size:12.5px; padding-left:10px; }
+  .band{ display:contents; }
+  /* A rotated square overflows its own box by ~(w-h)/2 top and bottom, so
+     the vertical margin has to clear that or the lower vertex collides
+     with the next row. */
+  .diamond{
+    width:150px; height:76px; border:1px solid #000; background:#fff;
+    transform:rotate(45deg); margin:46px auto 44px; position:relative;
+  }
+  .diamond span{
+    transform:rotate(-45deg); display:block; width:150px; position:absolute;
+    top:50%; left:50%; margin-left:-75px; margin-top:-16px;
+    text-align:center; font-size:12.5px; line-height:1.25;
+  }
+  .yesno{ font-size:12px; }
+  .hrow{ display:flex; align-items:center; justify-content:center; gap:0; }
+  .hline{ height:1px; background:#000; }
+  .harrow{ position:relative; height:1px; background:#000; }
+  .harrow::after{
+    content:""; position:absolute; right:-1px; top:-4.5px;
+    border-top:4.5px solid transparent; border-bottom:4.5px solid transparent;
+    border-left:8px solid #000;
+  }
+  .stagecol{ font-size:12.5px; letter-spacing:1px; }
+  .loopnote{ font-size:11.5px; font-style:italic; color:#000; }
+</style>
+</head>
+<body>
+
+<!-- ============================= FIGURE 1 ============================= -->
+<div class="sheet" id="fig1">
+<div class="f1">
+
+  <div class="flow col"><div class="term">&#128100; User</div><div class="arrow"></div></div>
+  <div class="brk"></div><div class="lbl"></div>
+
+  <div class="flow col">
+    <div class="box">Gradio Interface<br>(Web-Based Chat Application)</div>
+    <div class="arrow"></div>
+  </div>
+  <div class="brk"><i></i></div><div class="lbl">Presentation<br>Layer</div>
+
+  <div class="flow col">
+    <div class="box">LangGraph Conversation Manager</div><div class="arrow"></div>
+    <div class="box">Conversation State (Memory)</div><div class="arrow"></div>
+    <div class="box">
+      <span class="hd">Extract Travel Preferences</span>
+      <ol>
+        <li><b>Required</b></li>
+        <li>1. Destination</li>
+        <li>2. Trip Duration</li>
+        <li>3. Travel Group</li>
+        <li>4. Travel Interests</li>
+        <li>5. Budget Level</li>
+        <li style="padding-top:3px"><b>Optional</b></li>
+        <li>6. Travel Style</li>
+        <li>7. Travel Season</li>
+        <li>8. Must-Visit Attractions</li>
+      </ol>
+    </div>
+    <div class="arrow"></div>
+    <div class="box">Gap Analysis (plain Python)<br>Ask Only for Missing Fields</div>
+    <div class="arrow"></div>
+  </div>
+  <div class="brk"><i></i></div><div class="lbl">Conversation<br>Management<br>Layer</div>
+
+  <div class="flow col">
+    <div class="box">Prompt Builder</div><div class="arrow"></div>
+    <div class="box">Llama 3.2 Language Model</div><div class="arrow"></div>
+  </div>
+  <div class="brk"><i></i></div><div class="lbl">AI<br>Processing<br>Layer</div>
+
+  <div class="flow col">
+    <div class="box">Python Budget Calculator<br>(deterministic)</div><div class="arrow"></div>
+    <div class="box">Response Formatter</div><div class="arrow"></div>
+  </div>
+  <div class="brk"><i></i></div><div class="lbl">Business Logic<br>Layer</div>
+
+  <div class="flow col">
+    <div class="box">
+      <span class="hd">Personalized Travel Plan</span>
+      <ol>
+        <li>1. Itinerary</li><li>2. Activities</li><li>3. Transportation</li>
+        <li>4. Budget Estimate</li><li>5. Packing Checklist</li>
+      </ol>
+    </div>
+    <div class="arrow"></div>
+    <div class="box">Gradio Interface</div>
+    <div class="arrow"></div>
+    <div class="term">&#128100; User</div>
+  </div>
+  <div class="brk"><i></i></div><div class="lbl">Response Layer</div>
+
+</div>
+</div>
+
+<!-- ============================= FIGURE 2 ============================= -->
+<div class="sheet" id="fig2">
+<div style="display:grid; grid-template-columns: 470px 130px; align-items:stretch;">
+
+  <!-- STAGE 1 -->
+  <div class="col">
+    <div class="term">Start</div><div class="arrow"></div>
+    <div class="box round" style="width:330px">
+      Welcome User<br>Introduce Travel Assistant<br>Invite Free-Form Trip Description
+    </div>
+    <div class="arrow"></div>
+  </div>
+  <div class="lbl stagecol" style="display:flex;align-items:center;padding-left:14px">STAGE 1</div>
+
+  <!-- STAGE 2 -->
+  <div class="col">
+    <div class="box round" style="width:330px">
+      <span class="hd">Collect / Extract Travel Details</span>
+      <ol>
+        <li>Destination &nbsp;&middot;&nbsp; Trip Duration</li>
+        <li>Travel Group &nbsp;&middot;&nbsp; Travel Interests</li>
+        <li>Budget Level</li>
+        <li style="padding-top:2px">Optional: Travel Style, Season,</li>
+        <li>Must-Visit Attractions</li>
+      </ol>
+    </div>
+    <div class="arrow"></div>
+    <div class="diamond"><span>Any Required<br>Details Missing?</span></div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
+      <span class="yesno">Yes</span>
+      <div class="harrow" style="width:70px"></div>
+      <div class="box" style="font-size:12px">Ask Only for<br>Missing Fields</div>
+      <span class="loopnote">&#8630; loops back</span>
+    </div>
+    <div style="font-size:12px;margin-top:6px">No</div>
+    <div class="arrow"></div>
+  </div>
+  <div class="lbl stagecol" style="display:flex;align-items:center;padding-left:14px">STAGE 2</div>
+
+  <!-- STAGE 3 -->
+  <div class="col">
+    <div class="box round" style="width:330px">Show Summary of Collected Details<br>Ask User to Confirm</div>
+    <div class="arrow"></div>
+    <div class="diamond"><span>Confirmed?</span></div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
+      <span class="yesno">No</span>
+      <div class="harrow" style="width:70px"></div>
+      <div class="box" style="font-size:12px">Apply Preference Edit</div>
+      <span class="loopnote">&#8630; re-validates</span>
+    </div>
+    <div style="font-size:12px;margin-top:6px">Yes</div>
+    <div class="arrow"></div>
+    <div class="box round" style="width:330px">
+      <span class="hd">Generate Personalized Travel Plan</span>
+      <ol>
+        <li>Day-by-Day Itinerary</li>
+        <li>Recommended Attractions &amp; Activities</li>
+        <li>Transportation Suggestions</li>
+        <li>Estimated Budget</li>
+        <li>Packing Checklist</li>
+      </ol>
+    </div>
+    <div class="arrow"></div>
+    <div class="box" style="width:330px">Present Travel Plan to User</div>
+    <div class="arrow"></div>
+  </div>
+  <div class="lbl stagecol" style="display:flex;align-items:center;padding-left:14px">STAGE 3</div>
+
+  <!-- STAGE 4 -->
+  <div class="col">
+    <div class="diamond"><span>Modify Travel<br>Plan?</span></div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
+      <span class="yesno">Yes</span>
+      <div class="harrow" style="width:44px"></div>
+      <div class="box" style="font-size:12px">
+        <span class="hd">Update Selected Information</span>
+        <ol>
+          <li>Destination &middot; Trip Duration</li>
+          <li>Budget &middot; Travel Group</li>
+          <li>Interests &middot; Attractions</li>
+        </ol>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="box" style="width:330px">Regenerate Only the Affected Section(s)</div>
+    <div class="arrow"></div>
+    <div class="box" style="width:330px">Display Updated Travel Plan
+      <div class="loopnote">&#8630; returns to &ldquo;Modify Travel Plan?&rdquo;</div>
+    </div>
+    <div style="height:14px"></div>
+    <div style="font-size:12px">No</div>
+    <div class="arrow"></div>
+    <div class="box round" style="width:330px">End Conversation<br>Thank User &middot; Friendly Farewell</div>
+    <div class="arrow"></div>
+    <div class="term">End</div>
+  </div>
+  <div class="lbl stagecol" style="display:flex;align-items:center;padding-left:14px">STAGE 4</div>
+
+</div>
+</div>
+
+</body>
+</html>
