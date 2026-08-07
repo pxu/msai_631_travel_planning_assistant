@@ -9,7 +9,10 @@ design doc (architecture diagram, workflow/state diagrams, interaction
 sequence, UI design, and HCI heuristics). Not a coder? Start with
 [`docs/understanding_the_code.md`](docs/understanding_the_code.md) instead —
 a plain-English walkthrough of what each file does, no programming
-background required.
+background required. For a plain-English tour of the design decisions and
+the reasoning behind each one — why routing stays in Python, why the budget
+is computed rather than generated, why a null extraction counts as a
+success — see [`docs/interview_prep.md`](docs/interview_prep.md).
 
 ## Architecture
 
@@ -82,11 +85,96 @@ travel_assistant/
   llm.py      # loads the local model as a LangChain chat model
   graph.py    # the LangGraph StateGraph and its nodes
   app.py      # Gradio ChatInterface wiring
+evals/
+  extraction_cases.json   # ~30 labelled utterances with expected fields
+  extraction_eval.py      # scores the real model's extraction quality
 tests/
-  test_graph.py   # graph control-flow tests using a fake chat model (no GPU needed)
+  test_graph.py            # graph control-flow tests using a fake chat model (no GPU)
+  test_app.py              # session lifecycle + interrupt rendering
+  test_llm.py              # model-selection resolution (no weights loaded)
+  test_extraction_eval.py  # tests the eval scorer itself (also fake-model only)
 notebooks/
   travel_assistant_colab.ipynb   # thin notebook to run the Gradio demo on Colab
 ```
+
+## Measuring extraction quality
+
+`pytest` uses a fake chat model, so it verifies graph *logic* and says
+nothing about whether the real ~1B model can actually read "my wife and
+son" as `group_type="family"`. The eval harness supplies that number:
+
+```bash
+python -m evals.extraction_eval              # all cases, real local model
+python -m evals.extraction_eval --limit 5    # quick smoke run
+python -m evals.extraction_eval --tag grounding --verbose
+```
+
+It reports, per field, four outcomes:
+
+| outcome | meaning |
+|---|---|
+| **hit** | expected a value, got a matching one |
+| **miss** | expected a value, got nothing |
+| **wrong** | expected a value, got a different one |
+| **hallucination** | expected *nothing*, got a value |
+
+The last one is the one to watch. A model that invents `group_type="solo"`
+because the sentence never said who is travelling is far more damaging than
+one returning null: null triggers a follow-up question, whereas an invented
+value flows silently into the itinerary, the transport advice, and the
+budget multiplier. `--min-accuracy 0.9` exits non-zero for CI gating.
+
+### Trying a different model
+
+The checkpoint is selectable without a code change, so "would a bigger
+model help?" is a measurement rather than an argument:
+
+```bash
+TRAVEL_ASSISTANT_MODEL=unsloth/Llama-3.2-3B-Instruct python -m evals.extraction_eval
+TRAVEL_ASSISTANT_MODEL=unsloth/Llama-3.2-3B-Instruct python -m travel_assistant.app
+```
+
+Resolution order is the `model_id` argument → `TRAVEL_ASSISTANT_MODEL` →
+the per-device default. The 1B default is what the proposal specifies and
+what the architecture is built around, so a larger model is an upgrade
+rather than a prerequisite — routing stays in Python, the budget figure is
+computed deterministically, and extraction is backstopped in code either
+way. **Keep the backstops regardless of model size**: they are cheap and
+deterministic, and a bigger model reduces how often they fire without
+making them unnecessary. The `WARNING` emitted when the budget backstop
+fires is how you measure that.
+
+### Current baseline
+
+33 cases, `unsloth/Llama-3.2-1B-Instruct` in fp16 on Apple M4 Max (MPS):
+
+| metric | value |
+|---|---|
+| field accuracy (hit / expected-a-value) | **95.2 %** (99/104) |
+| hallucination rate (invented / should-be-null) | **0.0 %** (0/44) |
+| fully correct cases | 28/33 |
+| mean extraction latency | 0.90 s |
+| wrong values (extracted, but not the right one) | 0 |
+
+Two things worth reading off that table. **Zero "wrong"** — when this
+pipeline produces a value it is right; every failure is a *miss*, i.e. it
+declined rather than guessed. That is `_is_grounded` plus the normalizers
+doing their job, and it is the behaviour you want, because a miss becomes a
+follow-up question while a wrong value becomes a silently bad plan.
+
+The eval also paid for itself immediately: the first run scored 93.9 % with
+one hallucination — "Group of 4 going to Tokyo" read as a 4-day trip,
+because `_coerce_trip_length` scanned the message for *any* digit.
+`_find_duration_days` now requires the number to sit next to a duration
+noun, which killed that hallucination and picked up "a week" / "two weeks"
+as a bonus: 93.9 % → 94.9 %, 2.3 % → 0 % hallucinations, 25 → 27 perfect.
+
+The five remaining misses are honest known-hard cases and are left in
+deliberately, so the number doesn't flatter itself: a typo'd budget cue
+("budget is tight"), a destination buried behind a dollar figure, an
+adjectival `travel_style`, a negated preference ("I *don't* want museums —
+nightlife instead"), and one `must_visit_attractions` lost among a long
+list of interests.
 
 ## Running in Google Colab
 
@@ -151,18 +239,36 @@ not a live link to the code — if you change anything under
 `travel_assistant/`, regenerate it before teammates rely on it again:
 
 ```bash
-zip -rq travel_assistant_project.zip . \
+zip -FSrq travel_assistant_project.zip . \
   -x ".git/*" -x ".venv/*" -x "*__pycache__*" -x ".pytest_cache/*" \
-  -x ".idea/*" -x ".claude/*" -x "*.DS_Store" -x "travel_assistant_project.zip"
+  -x ".idea/*" -x ".claude/*" -x "*.DS_Store" -x "travel_assistant_project.zip" \
+  -x ".playwright-mcp/*" -x "docs/_build/*" -x ".ruff_cache/*"
 ```
+
+`-FS` (filesync) is deliberate: plain `-r` only adds and replaces, so
+files you have since deleted would linger in the archive forever.
 
 ## Running locally (logic only, no GPU needed)
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pytest tests/
+pip install -r requirements-dev.txt   # runtime deps + pytest + ruff
+pytest
+ruff check . && ruff format --check .
 ```
+
+The test suite never loads the real model, and importing `travel_assistant.app`
+doesn't either — the model is built lazily on the first chat message
+(`app.get_graph`). That's what lets CI run the whole suite on a CPU-only
+runner. `.github/workflows/ci.yml` asserts it with an explicit import step,
+so moving `build_chat_model()` back to module scope fails the build.
+
+Dependency versions carry upper bounds on purpose: `HuggingFacePipeline`
+reads invoke-time generation overrides only from a nested `pipeline_kwargs`
+dict, and `from_model_id(device=...)` wants a legacy CUDA index rather than
+a device string. A major bump would change either silently. Verified
+against langgraph 1.2, langchain 1.3, transformers 5.14, gradio 6.20,
+torch 2.13.
 
 ## Running the full demo locally
 

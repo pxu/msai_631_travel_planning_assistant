@@ -1,9 +1,8 @@
 # Understanding the Code (No Coding Background Needed)
 
-This is for Jane, Varsha, Monir, Akshay — anyone on the team who wants to
-follow along with what the code does, speak to it in the presentation or
-Results Report, or review it without being a Python developer. It assumes
-no programming experience. If you already know what a function or a
+This is for anyone on the team who wants to follow along with what the code
+does, speak to it in the presentation or Results Report, or review it
+without being a Python developer. It assumes no programming experience. If you already know what a function or a
 dictionary is, skim past the "tiny bit of Python" section.
 
 If you just want to **see the chatbot work** without reading any code, jump
@@ -67,8 +66,14 @@ travel_assistant/
   llm.py      <- connects to the AI language model
   graph.py    <- the actual conversation flow / decision logic
   app.py      <- the chat window the user actually sees and types into
+evals/
+  extraction_cases.json  <- ~30 example sentences + what the AI *should* pull out of them
+  extraction_eval.py     <- scores the real AI against those examples
 tests/
-  test_graph.py   <- automated checks that the conversation flow behaves correctly
+  test_graph.py           <- automated checks that the conversation flow behaves correctly
+  test_app.py             <- checks on the chat-window layer
+  test_llm.py             <- checks on which AI model gets picked
+  test_extraction_eval.py <- checks that the scorer itself is honest
 notebooks/
   travel_assistant_colab.ipynb   <- a runnable copy of the demo for Google Colab
 docs/
@@ -106,30 +111,32 @@ Skim this once, then refer back as needed while reading Section 5.
 
 ```python
 class TravelState(TypedDict, total=False):
-    last_user_input: Optional[str]
+    last_user_input: str | None
 
-    destination: Optional[str]
-    trip_length_days: Optional[int]
-    group_type: Optional[str]
-    interests: Optional[str]
-    budget_level: Optional[str]
+    destination: str | None
+    trip_length_days: int | None
+    group_type: GroupType | None
+    interests: str | None
+    budget_level: BudgetLevel | None
 
-    travel_style: Optional[str]
-    travel_season: Optional[str]
-    must_visit_attractions: Optional[str]
+    travel_style: str | None
+    travel_season: str | None
+    must_visit_attractions: str | None
 
-    collected_fields: Dict[str, str]
-    missing_fields: List[str]
+    budget_total_usd: int | None
+
+    collected_fields: dict[str, str]
+    missing_fields: list[str]
     conversation_stage: ConversationStage
-    confirmation_status: Optional[ConfirmationStatus]
+    confirmation_status: ConfirmationStatus | None
     extraction_attempts: int
-    regeneration_targets: Optional[List[str]]
+    regeneration_targets: list[str] | None
 
-    itinerary: Optional[str]
-    activities: Optional[str]
-    transportation: Optional[str]
-    budget_estimate: Optional[str]
-    packing_list: Optional[str]
+    itinerary: str | None
+    activities: str | None
+    transportation: str | None
+    budget_estimate: str | None
+    packing_list: str | None
 ```
 
 Read this as: *"Every conversation has these labeled boxes."* The five
@@ -141,9 +148,30 @@ types. A handful of bookkeeping boxes (`collected_fields`,
 `extraction_attempts`, `regeneration_targets`) track where the
 conversation currently stands — more on those in Section 5's walk through
 `graph.py`. The last five boxes (`itinerary` through `packing_list`) get
-filled in by the AI. `Optional[str]` just means "this box holds text, or
-is empty (`None`) until it's filled in." That's the entire file — it
-doesn't *do* anything, it just defines what the notebook looks like.
+filled in by the AI. `str | None` just means "this box holds text, or is
+empty (`None`) until it's filled in." That's the entire file — it doesn't
+*do* anything, it just defines what the notebook looks like.
+
+Two of the boxes are worth a closer look.
+
+**`group_type` and `budget_level` can only hold specific words.** That's
+what `GroupType` and `BudgetLevel` mean instead of plain `str`:
+`group_type` must be one of solo/couple/family/friends/students, and
+`budget_level` one of budget/moderate/luxury. The reason is that those two
+words are looked up in a price table later. If someone says "mid-range"
+and it got stored as-is, the lookup would quietly miss and fall back to a
+default price — producing a confident, plausible, *wrong* dollar figure
+with nothing on screen to hint at it. So anything the system can't
+translate into one of the allowed words is stored as "empty" instead, and
+the assistant simply asks again.
+
+**`budget_total_usd` holds a dollar figure the traveler actually said**
+("we have around $5,000"). It's kept separately from `budget_level`, as a
+number, because it is the most concrete thing anyone can say about money —
+if you name your own budget, quoting a computed figure back at you is the
+wrong answer. When it's filled in, the system uses that number as the
+estimate and works the *tier* out from it, rather than the other way
+round.
 
 ### `graph.py` — the conversation flowchart
 
@@ -279,6 +307,10 @@ You can skim this one. The only thing worth knowing:
   small enough to run without a paid subscription or API key, as required
   by the project proposal. It's used both for extracting structured
   details and for writing the final plan's sections.
+- You can point it at a different model without editing any code, by
+  setting `TRAVEL_ASSISTANT_MODEL` before starting the app. That exists so
+  the question "would a bigger model be better?" can be answered by
+  measuring (see Section 6) instead of arguing.
 
 ### `app.py` — the actual chat window
 
@@ -292,11 +324,21 @@ Gradio). The core idea, in plain English:
   asked (missing details, a confirmation, or a change request).
 - Depending on where the conversation is, the chatbot's reply is one of a
   few card types: a "here's what's missing" card, a "here's everything,
-  please confirm" card, the full finished plan, or a plain "anything else?"
-  question. `app.py` picks which one to show based on a label
-  (`"kind"`) attached to whatever the flowchart just paused on.
+  please confirm" card, **the finished plan followed by "any changes?"**,
+  or the finalized plan with a sign-off. `app.py` picks which one to show
+  based on a label (`"kind"`) attached to whatever the flowchart just
+  paused on.
+- When one plan is finished and the user starts describing a *different*
+  trip, `app.py` notices the old conversation has ended and begins a fresh
+  one. Without that, every later message re-displayed the finished plan
+  forever — ask for Rome after finalizing Japan, get Japan back.
 
-## 6. `test_graph.py` — the safety net
+## 6. Checking the work: two different safety nets
+
+There are two separate things worth checking, and they need different
+tools. It's a useful distinction even if you never write a test.
+
+### `tests/` — does the *conversation flow* behave?
 
 This file doesn't run the real AI model at all (that would be slow and
 need a GPU every time). Instead it swaps in a fake, instant "pretend AI":
@@ -308,9 +350,48 @@ extracted, nothing gets asked twice, editing one detail doesn't erase
 another, and asking to change one section of the finished plan only
 regenerates that section — without needing a GPU or an internet
 connection. If someone changes `graph.py` and breaks the flow, these tests
-catch it immediately. You don't need to read this file in detail; just
+catch it immediately. You don't need to read these files in detail; just
 know that "tests passing" means "the conversation logic still works as
 designed."
+
+But notice what this *cannot* tell you: because the AI is faked out, these
+tests say nothing about whether the real model is any good at its job.
+
+### `evals/` — is the *AI* any good?
+
+This is the other half, and it needs the real model. `evals/` holds about
+30 example sentences a traveler might type, each paired with what a
+correct reading would pull out of it. Running
+
+```bash
+python -m evals.extraction_eval
+```
+
+loads the real model, feeds it every example, and prints a scorecard. Each
+field lands in one of four buckets:
+
+| bucket | meaning |
+|---|---|
+| **hit** | there was something to find, and it found it |
+| **miss** | there was something to find, and it found nothing |
+| **wrong** | it found something, but the wrong thing |
+| **hallucination** | there was nothing to find, and it made something up |
+
+That last one is the one that matters most, and it's worth understanding
+why. If the sentence never says who is travelling and the AI answers
+"solo," nobody downstream can tell that was invented — it silently shapes
+the itinerary, the transport advice and the price. Whereas if the AI
+answers "I don't know," the assistant simply asks. **Declining to guess is
+a good outcome, not a failure**, so the scorecard counts it separately.
+
+At the last run: 95.2% of findable fields found, **0% hallucinations**, and
+**zero "wrong"** — meaning when this system states something, it's right;
+its failures are all "didn't spot it," never "made it up." That is the
+behaviour all the extra checking code in `graph.py` exists to produce.
+
+The eval earned its keep immediately. Its first run caught the AI reading
+"Group of 4 going to Tokyo" as a *4-day* trip — it had been scanning for
+any number at all. That's now fixed, and there's a test to keep it fixed.
 
 ## 7. Small, safe edits a non-coder can make
 
@@ -331,13 +412,17 @@ the rest of the code:
   `_CONFIRM_PHRASES` list near the top-middle of `graph.py` if the bot
   isn't recognizing a phrase as a "yes."
 
-**Don't touch** (ask Peng Fei first): anything in `llm.py`; the
+**Don't touch** (ask the code owner first): anything in `llm.py`; the
 `add_node`/`add_edge`/`add_conditional_edges` lines in `graph.py`; the
 extraction system prompts (`_EXTRACTION_SYSTEM_PROMPT`,
-`_EDIT_EXTRACTION_SYSTEM_PROMPT`); or `state.py` — these control how the
-pieces are wired together and how the AI is instructed to return
-structured data, and a small typo there can break the whole app in ways
-that are hard to spot without running it.
+`_EDIT_EXTRACTION_SYSTEM_PROMPT`); the price tables
+(`_DAILY_RATE_BY_BUDGET`, `_GROUP_MULTIPLIER`) and the word lists that
+feed them (`_BUDGET_LEVEL_SYNONYMS`, `_GROUP_TYPE_KEYWORDS`); or
+`state.py` — these control how the pieces are wired together, how the AI
+is instructed to return structured data, and how money is calculated. A
+small typo there can break the app in ways that are hard to spot without
+running it, or worse, quietly produce a wrong price that still *looks*
+right.
 
 ## 8. Trying it yourself
 

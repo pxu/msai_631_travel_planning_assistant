@@ -19,8 +19,10 @@ small local model is never asked to decide what happens next in the graph.
 """
 
 import json
+import logging
 import re
-from typing import Callable
+import time
+from collections.abc import Callable
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -30,10 +32,15 @@ from langgraph.types import interrupt
 
 from travel_assistant.state import (
     ALL_PREFERENCE_FIELDS,
+    BUDGET_LEVELS,
+    DISPLAYED_FIELDS,
     FIELD_LABELS,
+    GROUP_TYPES,
     REQUIRED_PREFERENCE_FIELDS,
     TravelState,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Extraction: turns free-form user text into structured preference fields
@@ -147,9 +154,21 @@ def _clean_value(value):
 
 
 _WORD_NUMBERS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-    "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
 }
 
 
@@ -163,9 +182,239 @@ def _find_number(text: str):
     return None
 
 
+_MAGNITUDE_SUFFIXES = {"k": 1_000, "m": 1_000_000, "thousand": 1_000, "million": 1_000_000}
+
+# "$200 a night", "$800 each", "$150 per person per day" are *rates*, not
+# trip totals. `_estimate_budget` returns a stated total verbatim, so
+# mistaking a rate for a total is not a rounding error — it caps a
+# seven-day family trip at $200. When a figure is qualified this way the
+# scan declines it and the deterministic rate table is used instead, which
+# is the conservative direction to fail in.
+_PER_UNIT_QUALIFIER = re.compile(
+    r"\s*(?:/|per\b|a\b|each\b|pp\b|apiece\b)\s*"
+    r"(?:night|day|person|adult|head|room|week)?",
+    re.IGNORECASE,
+)
+
+_DOLLAR_PATTERN = re.compile(
+    r"\$\s?(\d[\d,]*(?:\.\d+)?)\s*(k|m|thousand|million)?\b",
+    re.IGNORECASE,
+)
+
+
 def _find_dollar_amount(text: str):
-    match = re.search(r"\$\s?[\d,]+", text or "")
-    return match.group().replace(" ", "") if match else None
+    """Return an explicit whole-trip dollar total as an int, or None.
+
+    Returns a number rather than the matched string: a stated budget is
+    only useful downstream if it can be arithmetic, and keeping it as
+    ``"$4,000"`` is what previously let it be stored in ``budget_level``
+    and then silently ignored by the rate table.
+
+    Handles magnitude suffixes ("$4.5k") and rejects per-unit rates, since
+    the caller treats the result as the entire trip budget.
+    """
+    text = text or ""
+    for match in _DOLLAR_PATTERN.finditer(text):
+        digits, suffix = match.group(1), match.group(2)
+        try:
+            value = float(digits.replace(",", ""))
+        except ValueError:
+            continue
+        if suffix:
+            value *= _MAGNITUDE_SUFFIXES[suffix.lower()]
+        # Look just past the figure: "a night", "each", "per person" mean
+        # this is a rate, so it isn't the trip total and nothing else in the
+        # sentence is going to make it one.
+        if _PER_UNIT_QUALIFIER.match(text, match.end()):
+            continue
+        return int(value)
+    return None
+
+
+# Synonym -> canonical tier, matched on WORD BOUNDARIES. Plain substring
+# matching was a real defect: "mid" fired inside "pyramids" and "low" inside
+# "flower", so "a 7-day trip to Egypt to see the pyramids" silently acquired
+# a moderate budget the user never stated — the exact silently-wrong-answer
+# failure this whole normalization layer exists to prevent. Anything that
+# matches nothing normalizes to None, which returns the field to
+# `missing_fields` to be re-asked.
+_BUDGET_LEVEL_SYNONYMS = {
+    "budget": (
+        "budget",
+        "cheap",
+        "cheaper",
+        "inexpensive",
+        "affordable",
+        "economy",
+        "shoestring",
+        "frugal",
+        "backpacking",
+        "low cost",
+        "low-cost",
+        "lowcost",
+        "low budget",
+        "low-budget",
+    ),
+    "moderate": (
+        "moderate",
+        "mid",
+        "mid range",
+        "mid-range",
+        "midrange",
+        "medium",
+        "average",
+        "standard",
+        "comfortable",
+        "reasonable",
+    ),
+    "luxury": (
+        "luxury",
+        "luxurious",
+        "high end",
+        "high-end",
+        "highend",
+        "premium",
+        "upscale",
+        "splurge",
+        "lavish",
+        "five star",
+        "5 star",
+    ),
+}
+
+# The raw user message is scanned with a *stricter* set than the model's own
+# answer. The model's value is already scoped to this field, so a bare "mid"
+# there means the tier. In free text it usually doesn't — "mid September" is
+# a season, "low season" is a season, "standard room" is lodging. Only terms
+# that are unambiguous on their own survive into the raw-text scan.
+_AMBIGUOUS_IN_FREE_TEXT = frozenset(
+    {"mid", "medium", "average", "standard", "comfortable", "reasonable", "economy", "premium"}
+)
+
+
+def _tier_pattern(synonyms) -> re.Pattern:
+    alternation = "|".join(re.escape(s) for s in sorted(synonyms, key=len, reverse=True))
+    return re.compile(rf"(?<![\w-])(?:{alternation})(?![\w-])", re.IGNORECASE)
+
+
+_BUDGET_TIER_PATTERNS = {tier: _tier_pattern(syns) for tier, syns in _BUDGET_LEVEL_SYNONYMS.items()}
+_BUDGET_TIER_PATTERNS_STRICT = {
+    tier: _tier_pattern([s for s in syns if s not in _AMBIGUOUS_IN_FREE_TEXT])
+    for tier, syns in _BUDGET_LEVEL_SYNONYMS.items()
+}
+
+# "budget" is checked last because it is the one synonym that is also the
+# ordinary noun for the field itself: "a moderate budget" and "a comfortable
+# budget" both contain it, and both mean moderate. Testing the two
+# unambiguous tiers first means the bare word only decides when nothing more
+# specific is present.
+_BUDGET_LEVEL_ORDER = ("luxury", "moderate", "budget")
+
+
+# Phrases where "budget" is unambiguously the tier rather than the noun for
+# the field. Checked even when the bare word is disallowed, so "budget
+# travel" resolves while "we have around $4,000 budget" still doesn't.
+_BUDGET_AS_TIER_PHRASES = (
+    "budget travel",
+    "budget trip",
+    "budget option",
+    "budget-friendly",
+    "budget friendly",
+    "on a budget",
+    "tight budget",
+)
+
+
+def _normalize_budget_level(value, *, allow_bare_noun: bool = True):
+    """Map a free-text budget description onto a `BUDGET_LEVELS` member.
+
+    ``allow_bare_noun=False`` refuses to read the standalone word "budget"
+    as the cheap tier. Set it when scanning the user's raw message, where
+    that word is nearly always the noun for the field itself ("we have
+    around $4000 budget", "my budget is whatever") rather than a tier
+    choice. When the *model* returns "budget" as this field's value it does
+    mean the tier, so the default stays permissive.
+    """
+    if not isinstance(value, str):
+        return None
+    lowered = value.lower()
+    # allow_bare_noun=False also selects the stricter synonym set, because
+    # both concessions exist for the same reason: free text carries words
+    # that look like tier names but aren't.
+    patterns = _BUDGET_TIER_PATTERNS if allow_bare_noun else _BUDGET_TIER_PATTERNS_STRICT
+    for level in _BUDGET_LEVEL_ORDER:
+        if level == "budget" and not allow_bare_noun:
+            if any(phrase in lowered for phrase in _BUDGET_AS_TIER_PHRASES):
+                return "budget"
+            # Drop the bare noun, keep the compounds ("low-cost", "shoestring").
+            if _tier_pattern(
+                [
+                    s
+                    for s in _BUDGET_LEVEL_SYNONYMS["budget"]
+                    if s != "budget" and s not in _AMBIGUOUS_IN_FREE_TEXT
+                ]
+            ).search(lowered):
+                return "budget"
+            continue
+        if patterns[level].search(lowered):
+            return level
+    return None
+
+
+def _normalize_group_type(value):
+    """Map a free-text group description onto a `GROUP_TYPES` member.
+
+    Reuses the same keyword table as `_infer_group_type` so "family of four"
+    or "me and my wife" normalize the same way whether they arrived from the
+    model or from a raw-text scan.
+    """
+    if not isinstance(value, str):
+        return None
+    return _infer_group_type(value)
+
+
+# A number only counts as a trip length if it sits next to a duration noun.
+# Scanning the raw message for any digit at all is how "Group of 4 going to
+# Tokyo" became a 4-day trip — the eval set flags that as a hallucination,
+# which is the worst class of extraction error because nothing downstream
+# can tell the value was invented. Requiring the unit also picks up "a week"
+# and "two weeks", which a bare digit scan misses entirely.
+_ARTICLE_NUMBERS = {"a": 1, "an": 1}
+
+# Longest-first so "seventeen" is preferred over "seven" where both could
+# start at the same offset.
+_COUNT_WORDS = sorted((*_WORD_NUMBERS, *_ARTICLE_NUMBERS), key=len, reverse=True)
+_COUNT_WORD_ALT = "|".join(_COUNT_WORDS)
+
+# The bounded gap allows an adjective between the count and the unit — "5
+# high-end days", "3 relaxed nights" — without letting the number drift
+# arbitrarily far from the noun it is counting.
+#
+# The count alternation lists the number words explicitly rather than using
+# a generic `[a-z]+`, and the gap refuses to contain one. Both matter: with
+# a generic token, "I want a seven-day trip" matches starting at "want"
+# (gap "a seven-") and consumes the real number before it can be read; with
+# a permissive gap it matches at "a" (gap "seven-") and yields 1 day.
+_DURATION_PATTERN = re.compile(
+    rf"\b(?:(\d+)|({_COUNT_WORD_ALT}))[-\s]+"
+    rf"(?:(?!(?:{_COUNT_WORD_ALT})\b)[a-z-]+[-\s]+){{0,2}}?"
+    r"(day|night|week)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _find_duration_days(text: str):
+    """Trip length in days, read only from an explicit duration phrase."""
+    match = _DURATION_PATTERN.search(text or "")
+    if not match:
+        return None
+    digits, word, unit = match.groups()
+    count = (
+        int(digits)
+        if digits
+        else (_WORD_NUMBERS.get(word.lower()) or _ARTICLE_NUMBERS[word.lower()])
+    )
+    return count * 7 if unit.lower() == "week" else count
 
 
 def _coerce_trip_length(value, raw_text: str):
@@ -174,10 +423,19 @@ def _coerce_trip_length(value, raw_text: str):
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str):
+        # Try the unit-aware read first: the model sometimes answers this
+        # field as "2 weeks", and `_find_number` would take the 2 and drop
+        # the unit — planning, costing and packing a 14-day trip as a 2-day
+        # one, precisely when the model got the field right.
+        duration = _find_duration_days(value)
+        if duration is not None:
+            return duration
+        # Otherwise scan loosely: the string is already scoped to trip
+        # length, so a bare "7" or "seven" needs no duration noun.
         number = _find_number(value)
         if number is not None:
             return number
-    return _find_number(raw_text)
+    return _find_duration_days(raw_text)
 
 
 # Keyword groups used to infer group_type directly from the raw message
@@ -185,8 +443,23 @@ def _coerce_trip_length(value, raw_text: str):
 # couple) so "my wife and son" resolves to "family," not "couple" — the
 # presence of a child-related word takes priority over a partner-only word.
 _GROUP_TYPE_KEYWORDS = (
-    ("family", ("son", "daughter", "kids", "kid", "children", "child", "family",
-                "parents", "grandma", "grandpa", "grandmother", "grandfather")),
+    (
+        "family",
+        (
+            "son",
+            "daughter",
+            "kids",
+            "kid",
+            "children",
+            "child",
+            "family",
+            "parents",
+            "grandma",
+            "grandpa",
+            "grandmother",
+            "grandfather",
+        ),
+    ),
     ("couple", ("wife", "husband", "spouse", "partner", "girlfriend", "boyfriend", "couple")),
     ("friends", ("friends", "friend", "buddies", "buddy")),
     ("students", ("students", "classmates", "student")),
@@ -241,8 +514,12 @@ def _looks_like_specific_place(value: str) -> bool:
 
 
 def _known_fields_context(state: TravelState) -> str:
-    known = [f"{field}: {state[field]}" for field in ALL_PREFERENCE_FIELDS if state.get(field)]
-    return "Currently known preferences:\n" + "\n".join(known) if known else "No preferences known yet."
+    known = [f"{field}: {state[field]}" for field in DISPLAYED_FIELDS if state.get(field)]
+    return (
+        "Currently known preferences:\n" + "\n".join(known)
+        if known
+        else "No preferences known yet."
+    )
 
 
 def _merge_extracted(llm: BaseChatModel, state: TravelState, *, overwrite: bool) -> dict:
@@ -297,10 +574,14 @@ def _merge_extracted(llm: BaseChatModel, state: TravelState, *, overwrite: bool)
             # the message). A direct keyword scan doesn't depend on the
             # model guessing correctly, and unlike a free-text field this
             # one has a small, fixed vocabulary that's safe to hard-code.
+            #
+            # Whatever the model returned is normalized first ("a family of
+            # four" -> "family"), because this value indexes into
+            # _GROUP_MULTIPLIER; an un-normalized string used to fall
+            # through to the solo multiplier without anyone noticing.
+            normalized = _normalize_group_type(value)
             inferred = _infer_group_type(raw_text)
-            if not overwrite and value is None:
-                value = inferred
-            elif overwrite and inferred is not None and inferred != value:
+            if overwrite and inferred is not None and inferred != normalized:
                 # During an edit, the model sometimes just echoes back the
                 # previous group_type unchanged instead of recognizing the
                 # edit request as a change (e.g. "will only go byself" left
@@ -308,16 +589,33 @@ def _merge_extracted(llm: BaseChatModel, state: TravelState, *, overwrite: bool)
                 # deliberate statement about who's traveling, so a keyword
                 # match there overrides whatever the model returned.
                 value = inferred
-        if field == "budget_level" and value is None and not overwrite:
-            # The model sometimes paraphrases an explicit dollar figure
-            # into a category ("$4000" -> "mid-range") that then fails
-            # grounding above, discarding a value the user was completely
-            # explicit about. If the message contains a literal dollar
-            # amount, prefer that over any category the model invents.
-            dollar_amount = _find_dollar_amount(raw_text)
-            if dollar_amount:
-                value = dollar_amount
-        if field == "must_visit_attractions" and isinstance(value, str) and not _looks_like_specific_place(value):
+            else:
+                value = (
+                    normalized if normalized is not None else (inferred if not overwrite else None)
+                )
+        if field == "budget_level":
+            # Same reasoning as group_type: this indexes into
+            # _DAILY_RATE_BY_BUDGET, so "mid-range" must become "moderate"
+            # or it silently costs out at the default rate. An unmappable
+            # value normalizes to None, which puts budget_level back in
+            # missing_fields and gets it re-asked.
+            #
+            # The raw-text fallback matters as much as the normalization.
+            # `_is_grounded` runs *before* this and tokenizes the model's
+            # answer: for "a moderate budget" the model often replies
+            # "mid-range", whose tokens {mid, range} appear nowhere in the
+            # message, so grounding nulls it — dropping a preference the
+            # user stated outright. group_type survives that because
+            # `_infer_group_type` re-reads the message; budget_level needs
+            # the same backstop.
+            value = _normalize_budget_level(value) or _normalize_budget_level(
+                raw_text, allow_bare_noun=False
+            )
+        if (
+            field == "must_visit_attractions"
+            and isinstance(value, str)
+            and not _looks_like_specific_place(value)
+        ):
             # The model frequently misfiles a generic theme ("food",
             # "hiking") into this field instead of `interests` — reserve it
             # for actual named places and recover the value into `interests`
@@ -327,7 +625,40 @@ def _merge_extracted(llm: BaseChatModel, state: TravelState, *, overwrite: bool)
             value = None
         if value is not None:
             updates[field] = value
+
+    # A stated total ("$4000") is kept as a number in its own field rather
+    # than stuffed into budget_level. It is the single most concrete thing a
+    # user can say about budget, and `_estimate_budget` uses it verbatim
+    # instead of re-deriving a figure from the rate table.
+    if overwrite or not state.get("budget_total_usd"):
+        stated_total = _find_dollar_amount(raw_text)
+        if stated_total:
+            updates["budget_total_usd"] = stated_total
     return updates
+
+
+# Per-person, per-day thresholds used to place a stated total on the budget
+# scale — the midpoints between the tiers in _DAILY_RATE_BY_BUDGET.
+_BUDGET_TIER_THRESHOLDS = ((125, "budget"), (290, "moderate"))
+
+
+def _derive_budget_level(state: TravelState):
+    """Infer a budget tier from a stated total, once days and group are known.
+
+    Without this, a user who says only "$4000 for a week with my family"
+    would be asked to also pick a budget tier they have already implied.
+    Pure arithmetic, no LLM call.
+    """
+    total = state.get("budget_total_usd")
+    days = state.get("trip_length_days")
+    group = state.get("group_type")
+    if not total or not days or group not in _GROUP_MULTIPLIER:
+        return None
+    per_person_per_day = total / (days * _GROUP_MULTIPLIER[group])
+    for threshold, level in _BUDGET_TIER_THRESHOLDS:
+        if per_person_per_day < threshold:
+            return level
+    return "luxury"
 
 
 def collect_initial_request(state: TravelState) -> dict:
@@ -350,7 +681,9 @@ def _make_extract_preferences_node(llm: BaseChatModel) -> Callable[[TravelState]
     def extract_preferences(state: TravelState) -> dict:
         updates = _merge_extracted(llm, state, overwrite=False)
         found_required_field = any(field in updates for field in REQUIRED_PREFERENCE_FIELDS)
-        updates["extraction_attempts"] = 0 if found_required_field else state.get("extraction_attempts", 0) + 1
+        updates["extraction_attempts"] = (
+            0 if found_required_field else state.get("extraction_attempts", 0) + 1
+        )
         updates["conversation_stage"] = "extracting"
         return updates
 
@@ -360,10 +693,34 @@ def _make_extract_preferences_node(llm: BaseChatModel) -> Callable[[TravelState]
 def validate_preferences(state: TravelState) -> dict:
     """Pure gap analysis — no LLM call. The conditional edge out of this
     node reads ``missing_fields`` to decide where to go next."""
+    updates: dict = {}
+
+    # A stated total implies a tier once days and group are known, so don't
+    # ask for something the user has already told us in another form.
+    if not state.get("budget_level"):
+        derived = _derive_budget_level(state)
+        if derived:
+            updates["budget_level"] = derived
+            state = {**state, "budget_level": derived}
+
     missing = [field for field in REQUIRED_PREFERENCE_FIELDS if not state.get(field)]
-    collected = {field: str(state[field]) for field in ALL_PREFERENCE_FIELDS if state.get(field)}
+
+    # Don't ask for a budget tier from someone who just named a figure.
+    # `_derive_budget_level` needs trip length and group, which are required
+    # fields in their own right, so the tier is guaranteed to fill itself in
+    # on the pass where the last of them arrives. Listing it as missing in
+    # the meantime produces "I have your stated total budget ($5,000).
+    # Could you tell me your trip length and budget?" — which reads as
+    # having ignored the number the user just gave.
+    if state.get("budget_total_usd") and "budget_level" in missing:
+        missing.remove("budget_level")
+    # DISPLAYED_FIELDS, not ALL_PREFERENCE_FIELDS: a stated total is shown
+    # back to the user so the summary reflects the number they actually
+    # gave, rather than only the tier derived from it.
+    collected = {field: str(state[field]) for field in DISPLAYED_FIELDS if state.get(field)}
     stage = "ready" if not missing else "awaiting_missing_fields"
-    return {"missing_fields": missing, "collected_fields": collected, "conversation_stage": stage}
+    updates.update(missing_fields=missing, collected_fields=collected, conversation_stage=stage)
+    return updates
 
 
 def route_after_validation(state: TravelState) -> str:
@@ -405,11 +762,30 @@ def show_summary(state: TravelState) -> dict:
 # Short tokens are matched as whole words (via regex word boundaries) so
 # e.g. "ok" doesn't false-positive inside "looking" or "book"; multi-word
 # phrases are safe to match as plain substrings.
-_CONFIRM_WORDS = ("yes", "yeah", "yep", "confirm", "correct", "finalize", "perfect", "ok", "okay", "sure")
+_CONFIRM_WORDS = (
+    "yes",
+    "yeah",
+    "yep",
+    "confirm",
+    "correct",
+    "finalize",
+    "perfect",
+    "ok",
+    "okay",
+    "sure",
+)
 _CONFIRM_PHRASES = (
-    "sounds good", "looks good", "that's perfect", "that's right",
-    "no changes", "no change", "all set", "nothing else", "great, thanks",
-    "proceed", "go ahead",
+    "sounds good",
+    "looks good",
+    "that's perfect",
+    "that's right",
+    "no changes",
+    "no change",
+    "all set",
+    "nothing else",
+    "great, thanks",
+    "proceed",
+    "go ahead",
 )
 
 # Catches affirmative sentence *patterns* the literal lists above miss —
@@ -437,14 +813,24 @@ def _is_confirmation(text: str) -> bool:
 
 
 def confirm_preferences(state: TravelState) -> dict:
-    answer = interrupt({"kind": "summary_confirmation", "collected_fields": state.get("collected_fields", {})})
+    answer = interrupt(
+        {"kind": "summary_confirmation", "collected_fields": state.get("collected_fields", {})}
+    )
     if _is_confirmation(answer):
-        return {"confirmation_status": "confirmed", "conversation_stage": "ready", "last_user_input": answer}
+        return {
+            "confirmation_status": "confirmed",
+            "conversation_stage": "ready",
+            "last_user_input": answer,
+        }
     return {"last_user_input": answer, "confirmation_status": "pending"}
 
 
 def route_after_confirmation(state: TravelState) -> str:
-    return "generate_itinerary" if state.get("confirmation_status") == "confirmed" else "apply_preference_edit"
+    return (
+        "generate_itinerary"
+        if state.get("confirmation_status") == "confirmed"
+        else "apply_preference_edit"
+    )
 
 
 def _make_apply_preference_edit_node(llm: BaseChatModel) -> Callable[[TravelState], dict]:
@@ -455,6 +841,16 @@ def _make_apply_preference_edit_node(llm: BaseChatModel) -> Callable[[TravelStat
         return updates
 
     return apply_preference_edit
+
+
+class LLMInvocationError(RuntimeError):
+    """The chat model failed to produce a response.
+
+    Wraps whatever the backend raised (OOM, tokenizer failure, a broken
+    pipeline) in one domain type so callers — notably ``app.py`` — can show
+    the user something useful instead of a raw traceback, without having to
+    know which backend is in use.
+    """
 
 
 def _generate(
@@ -471,8 +867,36 @@ def _generate(
     # invoke-time generation overrides from; top-level kwargs are silently
     # ignored.
     kwargs = {"pipeline_kwargs": {"do_sample": False}} if deterministic else {}
-    response = llm.invoke(messages, **kwargs)
-    return response.content.strip()
+
+    call_kind = "extract" if deterministic else "generate"
+    started = time.perf_counter()
+    try:
+        response = llm.invoke(messages, **kwargs)
+    except Exception as exc:
+        logger.exception(
+            "llm.invoke failed kind=%s elapsed=%.2fs prompt_chars=%d",
+            call_kind,
+            time.perf_counter() - started,
+            len(user_prompt),
+        )
+        raise LLMInvocationError(f"{call_kind} call to the language model failed") from exc
+
+    elapsed = time.perf_counter() - started
+    text = (response.content or "").strip()
+    # INFO carries the numbers you need to spot a regression (latency, empty
+    # or truncated output); the prompt and completion themselves go to DEBUG
+    # so enabling them is a deliberate act — they contain user trip details.
+    logger.info(
+        "llm.invoke kind=%s elapsed=%.2fs prompt_chars=%d response_chars=%d",
+        call_kind,
+        elapsed,
+        len(user_prompt),
+        len(text),
+    )
+    logger.debug("llm.invoke kind=%s prompt=%r response=%r", call_kind, user_prompt, text)
+    if not text:
+        logger.warning("llm.invoke kind=%s returned an empty response", call_kind)
+    return text
 
 
 _ASSISTANT_SYSTEM_PROMPT = (
@@ -551,27 +975,104 @@ _GROUP_MULTIPLIER = {"solo": 1, "couple": 2, "family": 4, "friends": 3, "student
 
 
 def _estimate_budget(state: TravelState) -> int:
-    daily_rate = _DAILY_RATE_BY_BUDGET.get(
-        (state.get("budget_level") or "moderate").lower(), 175
+    """Total trip cost in USD.
+
+    A total the traveler stated outright wins over the rate table — they
+    know their own budget better than a lookup does.
+
+    Every remaining input is required and normalized by the time generation
+    runs, so a missing or unrecognized value is a bug in the pipeline, not a
+    user error: it raises rather than defaulting. The previous
+    ``or "moderate"`` / ``or "solo"`` / ``or 3`` fallbacks meant an
+    unnormalized ``budget_level`` (e.g. "mid-range") produced a confident,
+    plausible, wrong number with nothing in the output to signal it.
+    """
+    stated_total = state.get("budget_total_usd")
+    if stated_total:
+        return int(stated_total)
+
+    budget_level = state.get("budget_level")
+    group_type = state.get("group_type")
+    days = state.get("trip_length_days")
+    if budget_level not in _DAILY_RATE_BY_BUDGET:
+        raise ValueError(f"budget_level must be one of {BUDGET_LEVELS}, got {budget_level!r}")
+    if group_type not in _GROUP_MULTIPLIER:
+        raise ValueError(f"group_type must be one of {GROUP_TYPES}, got {group_type!r}")
+    if not isinstance(days, int) or days <= 0:
+        raise ValueError(f"trip_length_days must be a positive int, got {days!r}")
+
+    return _DAILY_RATE_BY_BUDGET[budget_level] * _GROUP_MULTIPLIER[group_type] * days
+
+
+_MONEY_PATTERN = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)")
+
+
+def _conflicting_amounts(text: str, authoritative: int) -> list[int]:
+    """Dollar figures in the narration that aren't the authoritative total."""
+    found = set()
+    for raw in _MONEY_PATTERN.findall(text or ""):
+        try:
+            value = int(float(raw.replace(",", "")))
+        except ValueError:
+            continue
+        if value != authoritative:
+            found.add(value)
+    return sorted(found)
+
+
+def _budget_fallback_text(state: TravelState, estimate: int, stated: bool) -> str:
+    source = "the total budget you gave me" if stated else "a rough per-day estimate"
+    return (
+        f"Based on {source}, plan for about ${estimate:,} for this "
+        f"{state['trip_length_days']}-day trip to {state['destination']} "
+        f"({state['group_type']}, {state['budget_level']} level). That figure is "
+        "meant to cover lodging, food, activities and local transport. It's a "
+        "rough planning number, not a live price."
     )
-    multiplier = _GROUP_MULTIPLIER.get((state.get("group_type") or "solo").lower(), 1)
-    days = state.get("trip_length_days") or 3
-    return daily_rate * multiplier * days
 
 
 def _budget_update(llm: BaseChatModel, state: TravelState) -> dict:
     estimate = _estimate_budget(state)
+    stated = bool(state.get("budget_total_usd"))
+    figure_line = (
+        f"The traveler's stated total budget: ${estimate}"
+        if stated
+        else f"Rough total budget estimate: ${estimate}"
+    )
     prompt = (
         f"Destination: {state['destination']}\n"
         f"Trip length: {state['trip_length_days']} days\n"
         f"Traveler group: {state['group_type']}\n"
         f"Budget level: {state['budget_level']}\n"
-        f"Rough total budget estimate: ${estimate}\n\n"
-        "Write a 2-3 sentence budget summary that presents this estimate and briefly "
-        "breaks down what it should roughly cover (lodging, food, activities, local "
-        "transport). Make clear this is a rough estimate, not a live price."
+        f"{figure_line}\n\n"
+        "Write a 2-3 sentence budget summary that presents this figure and says "
+        "in words what it is expected to cover (lodging, food, activities, local "
+        "transport). Do NOT invent per-category dollar amounts, per-night rates, "
+        "or any other numbers — quote only the total above. Make clear this is a "
+        "rough estimate, not a live price."
     )
     text = _generate(llm, _ASSISTANT_SYSTEM_PROMPT, prompt)
+
+    # Trust, then verify. The prompt above tells the model not to invent
+    # dollar figures, and a ~1B model ignores that instruction often enough
+    # to matter: an observed run answered a $5,000 stated budget with
+    # "approximately $1,200", and another produced "$1,800-$2,200 per night
+    # for 3 nights ... approximately $540-$720 total" — self-contradictory
+    # arithmetic presented with full confidence. The budget is the one
+    # output users are most likely to check, so a narration that disagrees
+    # with the authoritative figure is discarded in favour of a
+    # deterministic sentence rather than shown. Same principle as
+    # `_is_grounded`: a code-level backstop for a failure the prompt alone
+    # cannot prevent.
+    conflicts = _conflicting_amounts(text, estimate)
+    if conflicts:
+        logger.warning(
+            "budget narration quoted %s against an authoritative $%d — using the "
+            "deterministic sentence instead",
+            [f"${c:,}" for c in conflicts],
+            estimate,
+        )
+        text = _budget_fallback_text(state, estimate, stated)
     return {"budget_estimate": text}
 
 
@@ -609,7 +1110,12 @@ _CANONICAL_GENERATION_ORDER = (
 )
 
 _FIELD_TO_REGEN_NODES = {
-    "destination": ("generate_itinerary", "generate_activities", "generate_transportation", "generate_packing"),
+    "destination": (
+        "generate_itinerary",
+        "generate_activities",
+        "generate_transportation",
+        "generate_packing",
+    ),
     "trip_length_days": ("generate_itinerary", "generate_budget", "generate_packing"),
     "group_type": ("generate_itinerary", "generate_transportation", "generate_budget"),
     "interests": ("generate_activities", "generate_packing"),
@@ -617,6 +1123,11 @@ _FIELD_TO_REGEN_NODES = {
     "travel_style": ("generate_itinerary", "generate_activities"),
     "travel_season": ("generate_packing",),
     "must_visit_attractions": ("generate_itinerary", "generate_activities"),
+    # Not a preference field, but an edit that changes only the stated total
+    # ("actually our budget is $9000") must still redo the budget section —
+    # otherwise regenerate_affected no-ops and review_plan re-shows the
+    # identical plan, which reads as the assistant ignoring the request.
+    "budget_total_usd": ("generate_budget",),
 }
 
 _REGEN_DISPATCH = {
@@ -628,13 +1139,43 @@ _REGEN_DISPATCH = {
 }
 
 
+#: The fields `format_summary` renders. `review_plan` ships them inside its
+#: interrupt payload so the UI can show the plan it is asking about.
+PLAN_FIELDS = (
+    "destination",
+    "itinerary",
+    "activities",
+    "transportation",
+    "budget_estimate",
+    "packing_list",
+)
+
+
 def review_plan(state: TravelState) -> dict:
     answer = interrupt(
-        {"kind": "plan_review", "prompt": "Would you like any changes, or shall I finalize this plan?"}
+        {
+            "kind": "plan_review",
+            # The plan travels with the question. Without it the UI renders
+            # the prompt alone, so the user is asked "would you like any
+            # changes?" about a plan they have never seen — the five
+            # sections were generated but stayed invisible until after they
+            # confirmed. The regenerate loop had the same hole: requesting
+            # an edit produced no visible result.
+            "plan": {field: state.get(field) for field in PLAN_FIELDS},
+            "prompt": "Would you like any changes, or shall I finalize this plan?",
+        }
     )
     if _is_confirmation(answer):
-        return {"confirmation_status": "confirmed", "conversation_stage": "complete", "last_user_input": answer}
-    return {"last_user_input": answer, "conversation_stage": "reviewing", "confirmation_status": "pending"}
+        return {
+            "confirmation_status": "confirmed",
+            "conversation_stage": "complete",
+            "last_user_input": answer,
+        }
+    return {
+        "last_user_input": answer,
+        "conversation_stage": "reviewing",
+        "confirmation_status": "pending",
+    }
 
 
 def route_after_review(state: TravelState) -> str:
@@ -645,7 +1186,8 @@ def _make_apply_plan_edit_node(llm: BaseChatModel) -> Callable[[TravelState], di
     def apply_plan_edit(state: TravelState) -> dict:
         updates = _merge_extracted(llm, state, overwrite=True)
         changed_fields = [
-            field for field in ALL_PREFERENCE_FIELDS
+            field
+            for field in DISPLAYED_FIELDS
             if field in updates and str(updates[field]) != str(state.get(field))
         ]
 
@@ -714,7 +1256,10 @@ def build_graph(llm: BaseChatModel, checkpointer: BaseCheckpointSaver):
     builder.add_conditional_edges(
         "confirm_preferences",
         route_after_confirmation,
-        {"generate_itinerary": "generate_itinerary", "apply_preference_edit": "apply_preference_edit"},
+        {
+            "generate_itinerary": "generate_itinerary",
+            "apply_preference_edit": "apply_preference_edit",
+        },
     )
     builder.add_edge("apply_preference_edit", "validate_preferences")
     builder.add_edge("generate_itinerary", "generate_activities")

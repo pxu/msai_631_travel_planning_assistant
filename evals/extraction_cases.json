@@ -1,0 +1,215 @@
+{
+  "_comment": [
+    "Evaluation set for travel_assistant.graph._merge_extracted.",
+    "",
+    "Each case is one user utterance and the fields a correct extraction",
+    "would produce. `null` is a real expectation, not 'don't care': the",
+    "most damaging small-model failure here is inventing a plausible value",
+    "for a field the user never mentioned (group_type='solo' when nobody",
+    "said who is travelling), which then flows into the plan unchallenged.",
+    "The harness scores those as hallucinations separately from misses.",
+    "",
+    "`tags` group cases by the mechanism they exercise so a regression can",
+    "be attributed to a specific piece of defensive logic."
+  ],
+  "cases": [
+    {
+      "id": "full-front-loaded",
+      "utterance": "I'm planning a 7-day family trip to Japan with a moderate budget, we love food and temples.",
+      "tags": ["happy-path"],
+      "expected": {"destination": "Japan", "trip_length_days": 7, "group_type": "family", "interests": "food, temples", "budget_level": "moderate"}
+    },
+    {
+      "id": "destination-only",
+      "utterance": "I want to go to Lisbon.",
+      "tags": ["grounding", "sparse"],
+      "expected": {"destination": "Lisbon", "trip_length_days": null, "group_type": null, "interests": null, "budget_level": null}
+    },
+    {
+      "id": "no-group-stated",
+      "utterance": "Five days in Rome, I'm into art museums, keeping it cheap.",
+      "tags": ["grounding"],
+      "expected": {"destination": "Rome", "trip_length_days": 5, "group_type": null, "interests": "art museums", "budget_level": "budget"}
+    },
+    {
+      "id": "wife-and-son-implies-family",
+      "utterance": "Taking my wife and son to Orlando for 4 days.",
+      "tags": ["infer-group"],
+      "expected": {"destination": "Orlando", "trip_length_days": 4, "group_type": "family", "interests": null, "budget_level": null}
+    },
+    {
+      "id": "girlfriend-implies-couple",
+      "utterance": "A long weekend in Paris with my girlfriend, we like wine and walking.",
+      "tags": ["infer-group"],
+      "expected": {"destination": "Paris", "trip_length_days": null, "group_type": "couple", "interests": "wine, walking", "budget_level": null}
+    },
+    {
+      "id": "buddies-implies-friends",
+      "utterance": "Me and three buddies want to do 5 days in Barcelona on a shoestring.",
+      "tags": ["infer-group", "budget-synonym"],
+      "expected": {"destination": "Barcelona", "trip_length_days": 5, "group_type": "friends", "interests": null, "budget_level": "budget"}
+    },
+    {
+      "id": "solo-explicit",
+      "utterance": "Solo trip to Reykjavik for 6 days, I want to see the northern lights.",
+      "tags": ["infer-group"],
+      "expected": {"destination": "Reykjavik", "trip_length_days": 6, "group_type": "solo", "interests": "northern lights", "budget_level": null}
+    },
+    {
+      "id": "byself-typo",
+      "utterance": "going to Seoul byself for 3 days, budget is tight",
+      "tags": ["infer-group", "budget-synonym", "typo"],
+      "expected": {"destination": "Seoul", "trip_length_days": 3, "group_type": "solo", "interests": null, "budget_level": "budget"}
+    },
+    {
+      "id": "spelled-out-number",
+      "utterance": "We're doing a seven-day trip to Peru, my husband and I love hiking.",
+      "tags": ["coerce-length", "infer-group"],
+      "expected": {"destination": "Peru", "trip_length_days": 7, "group_type": "couple", "interests": "hiking", "budget_level": null}
+    },
+    {
+      "id": "ten-days-word",
+      "utterance": "ten days in New Zealand please, luxury all the way",
+      "tags": ["coerce-length", "budget-synonym"],
+      "expected": {"destination": "New Zealand", "trip_length_days": 10, "group_type": null, "interests": null, "budget_level": "luxury"}
+    },
+    {
+      "id": "mid-range-synonym",
+      "utterance": "8 days in Vietnam, mid-range budget, street food is the whole point.",
+      "tags": ["budget-synonym"],
+      "expected": {"destination": "Vietnam", "trip_length_days": 8, "group_type": null, "interests": "street food", "budget_level": "moderate"}
+    },
+    {
+      "id": "high-end-synonym",
+      "utterance": "My partner and I want 5 high-end days in Dubai.",
+      "tags": ["budget-synonym", "infer-group"],
+      "expected": {"destination": "Dubai", "trip_length_days": 5, "group_type": "couple", "interests": null, "budget_level": "luxury"}
+    },
+    {
+      "id": "affordable-synonym",
+      "utterance": "Somewhere affordable — 4 days in Krakow with two classmates.",
+      "tags": ["budget-synonym", "infer-group"],
+      "expected": {"destination": "Krakow", "trip_length_days": 4, "group_type": "students", "interests": null, "budget_level": "budget"}
+    },
+    {
+      "id": "dollar-total",
+      "utterance": "We have around $4000 for a 6-day trip to Iceland, just me and my wife.",
+      "tags": ["dollar-amount", "infer-group"],
+      "expected": {"destination": "Iceland", "trip_length_days": 6, "group_type": "couple", "interests": null, "budget_total_usd": 4000}
+    },
+    {
+      "id": "dollar-with-comma",
+      "utterance": "Budget is $12,000 for two weeks in Kenya with the kids.",
+      "tags": ["dollar-amount", "infer-group"],
+      "expected": {"destination": "Kenya", "group_type": "family", "budget_total_usd": 12000}
+    },
+    {
+      "id": "generic-theme-is-interest-not-attraction",
+      "utterance": "3 days in Austin, we're mostly here for the food and live music.",
+      "tags": ["attraction-vs-interest"],
+      "expected": {"destination": "Austin", "trip_length_days": 3, "interests": "food, live music", "must_visit_attractions": null}
+    },
+    {
+      "id": "named-attraction",
+      "utterance": "4 days in Paris, I have to see the Eiffel Tower and the Louvre.",
+      "tags": ["attraction-vs-interest"],
+      "expected": {"destination": "Paris", "trip_length_days": 4, "must_visit_attractions": "Eiffel Tower, Louvre"}
+    },
+    {
+      "id": "season-stated",
+      "utterance": "Thinking about Kyoto in autumn, 5 days, moderate budget, temples and gardens.",
+      "tags": ["optional-fields"],
+      "expected": {"destination": "Kyoto", "trip_length_days": 5, "travel_season": "autumn", "budget_level": "moderate", "interests": "temples, gardens"}
+    },
+    {
+      "id": "style-stated",
+      "utterance": "A relaxed, slow-paced 9 days in Bali for me and my husband.",
+      "tags": ["optional-fields", "infer-group"],
+      "expected": {"destination": "Bali", "trip_length_days": 9, "group_type": "couple", "travel_style": "relaxed, slow-paced"}
+    },
+    {
+      "id": "nothing-useful",
+      "utterance": "Hi there, can you help me?",
+      "tags": ["grounding", "sparse"],
+      "expected": {"destination": null, "trip_length_days": null, "group_type": null, "interests": null, "budget_level": null}
+    },
+    {
+      "id": "vague-intent",
+      "utterance": "I want to plan a vacation.",
+      "tags": ["grounding", "sparse"],
+      "expected": {"destination": null, "trip_length_days": null, "group_type": null, "interests": null, "budget_level": null}
+    },
+    {
+      "id": "budget-only",
+      "utterance": "Keeping it cheap.",
+      "tags": ["grounding", "sparse", "budget-synonym"],
+      "expected": {"destination": null, "trip_length_days": null, "group_type": null, "interests": null, "budget_level": "budget"}
+    },
+    {
+      "id": "length-only",
+      "utterance": "About 12 days.",
+      "tags": ["grounding", "sparse"],
+      "expected": {"destination": null, "trip_length_days": 12, "group_type": null, "interests": null, "budget_level": null}
+    },
+    {
+      "id": "interests-only",
+      "utterance": "I'm mostly interested in scuba diving and seafood.",
+      "tags": ["grounding", "sparse"],
+      "expected": {"destination": null, "trip_length_days": null, "group_type": null, "interests": "scuba diving, seafood", "budget_level": null}
+    },
+    {
+      "id": "nickname-destination",
+      "utterance": "Take me to the Big Apple for 3 days.",
+      "tags": ["ungrounded-destination"],
+      "expected": {"destination": "New York", "trip_length_days": 3}
+    },
+    {
+      "id": "multi-city",
+      "utterance": "Two weeks across Portugal and Spain with my family, moderate budget.",
+      "tags": ["hard"],
+      "expected": {"destination": "Portugal, Spain", "group_type": "family", "budget_level": "moderate"}
+    },
+    {
+      "id": "a-week-no-digit",
+      "utterance": "A week in Athens with my parents, we love ruins.",
+      "tags": ["hard", "coerce-length", "infer-group"],
+      "expected": {"destination": "Athens", "trip_length_days": 7, "group_type": "family", "interests": "ruins"}
+    },
+    {
+      "id": "negated-preference",
+      "utterance": "5 days in Berlin, and I really don't want museums — nightlife instead.",
+      "tags": ["hard"],
+      "expected": {"destination": "Berlin", "trip_length_days": 5, "interests": "nightlife"}
+    },
+    {
+      "id": "grandparents-implies-family",
+      "utterance": "Bringing my grandma to Charleston for 3 days, easy pace, moderate budget.",
+      "tags": ["infer-group", "optional-fields"],
+      "expected": {"destination": "Charleston", "trip_length_days": 3, "group_type": "family", "budget_level": "moderate"}
+    },
+    {
+      "id": "everything-plus-optionals",
+      "utterance": "My two friends and I want 6 days in Mexico City next spring on a moderate budget — street food, murals, and we must see Teotihuacan.",
+      "tags": ["happy-path", "optional-fields"],
+      "expected": {"destination": "Mexico City", "trip_length_days": 6, "group_type": "friends", "interests": "street food, murals", "budget_level": "moderate", "travel_season": "spring", "must_visit_attractions": "Teotihuacan"}
+    },
+    {
+      "id": "unmappable-budget-word",
+      "utterance": "4 days in Prague, my budget is whatever.",
+      "tags": ["budget-synonym", "grounding"],
+      "expected": {"destination": "Prague", "trip_length_days": 4, "budget_level": null}
+    },
+    {
+      "id": "budget-as-tier-not-noun",
+      "utterance": "4-day solo trip to Lisbon, I love seafood, budget travel.",
+      "tags": ["budget-synonym"],
+      "expected": {"destination": "Lisbon", "trip_length_days": 4, "group_type": "solo", "interests": "seafood", "budget_level": "budget"}
+    },
+    {
+      "id": "number-that-is-not-a-duration",
+      "utterance": "Group of 4 going to Tokyo, we love ramen.",
+      "tags": ["hard", "coerce-length"],
+      "expected": {"destination": "Tokyo", "trip_length_days": null, "interests": "ramen"}
+    }
+  ]
+}

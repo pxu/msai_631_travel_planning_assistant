@@ -18,18 +18,34 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # Run tests (logic-only, no GPU/model download required)
-pytest tests/
+pytest
 pytest tests/test_graph.py::test_post_generation_edit_regenerates_only_the_affected_section  # single test
+
+# Lint / format (ruff config lives in pyproject.toml)
+ruff check . && ruff format --check .
+
+# Measure real-model extraction quality (loads the model; slow)
+python -m evals.extraction_eval --limit 5
 
 # Run the full demo locally (auto-detects CUDA / Apple Silicon MPS / CPU)
 python -m travel_assistant.app
 ```
 
-There is no lint/format tooling configured in this repo (no linter config,
-no pre-commit). Tests are the only automated check — `pytest tests/` uses a
-fake chat model (it branches on the system prompt: extraction calls get a
-small regex-based fake extractor, generation calls get an echoed prompt
-snippet), so it never downloads the real model or needs a GPU.
+`pytest` uses a fake chat model (it branches on the system prompt:
+extraction calls get a small regex-based fake extractor, generation calls
+get an echoed prompt snippet), so it never downloads the real model or
+needs a GPU. `pyproject.toml` sets `pythonpath = ["."]` — without it, bare
+`pytest` fails on imports while `python -m pytest` works, because only the
+latter puts the CWD on `sys.path`.
+
+`.github/workflows/ci.yml` runs ruff + pytest on 3.11–3.13 with CPU-only
+torch, plus an explicit `import travel_assistant.app` step. That import is
+a regression guard: the model is built lazily in `app.get_graph()`
+(`@lru_cache`), and moving `build_chat_model()` back to module scope would
+make CI download a 1B checkpoint and time out.
+
+`ruff` is a dev-only dependency in `requirements-dev.txt`; nothing under
+`travel_assistant/` or `evals/` imports it.
 
 To try the full demo without local setup, use Google Colab (free T4 GPU) —
 see the README's "Running in Google Colab" section for the upload/clone
@@ -100,6 +116,61 @@ reserve the LLM for extraction/generation inside a node.
     `_GROUP_MULTIPLIER` × days) in plain Python; the LLM only narrates that
     number. This keeps the one output users are most likely to sanity-check
     independent of the small model's arithmetic.
+  - `budget_level` and `group_type` are **closed vocabularies**
+    (`BUDGET_LEVELS`/`GROUP_TYPES` in `state.py`) because they index into
+    those two tables. `_normalize_budget_level`/`_normalize_group_type` map
+    free text onto them at extraction time; anything unmappable becomes
+    `None`, which puts the field back in `missing_fields` and gets it
+    re-asked. `_estimate_budget` **raises** on an unrecognized value rather
+    than defaulting — the previous `or "moderate"` / `or "solo"` / `or 3`
+    fallbacks turned "mid-range" into a confident, plausible, wrong number
+    with nothing in the output to signal it. Note the synonym table checks
+    `luxury` and `moderate` before `budget`, since "budget" is also the
+    ordinary noun for the field ("a moderate budget"). Synonyms are matched
+    on **word boundaries**, not substrings: plain `in` matching fired "mid"
+    inside *pyramids* and "low" inside *flower*, so a message that never
+    mentioned money silently acquired a tier, skipped the question, and
+    costed the trip at the invented rate. The raw-message scan additionally
+    uses a stricter vocabulary than the model's own answer
+    (`_AMBIGUOUS_IN_FREE_TEXT`) — "mid September" is a date and "low season"
+    is a season, so those words only mean a tier when the model is
+    answering that specific field.
+  - `_find_dollar_amount` rejects per-unit rates ("$200 a night", "$800
+    each") and parses magnitude suffixes ("$4.5k"). Since `_estimate_budget`
+    returns a stated total verbatim, reading a nightly rate as the total
+    caps a seven-day family trip at $200; declining and falling back to the
+    rate table is the safe direction to fail in.
+  - `_coerce_trip_length` routes a model-returned *string* through
+    `_find_duration_days` before `_find_number`, so an answer of `"2 weeks"`
+    becomes 14 rather than 2 — the failure showed up precisely when the
+    model got the field right.
+  - An explicitly stated total goes to `budget_total_usd`, not
+    `budget_level`, and `_estimate_budget` returns it verbatim — a user who
+    says "$4000" should not be quoted a rate-table number instead.
+    `validate_preferences` back-derives the tier from that total once days
+    and group are known (`_derive_budget_level`), so stating a number
+    doesn't also trigger a redundant question.
+  - `_generate` logs latency and prompt/response sizes at INFO and the full
+    text at DEBUG (it contains user trip details), and wraps any backend
+    failure in `LLMInvocationError` so `app.py` can show a usable message
+    instead of a traceback in the chat window.
+  - The budget narration is verified, not trusted: `_conflicting_amounts`
+    scans the model's prose for dollar figures that disagree with the
+    authoritative total and, if any are found, replaces the whole narration
+    with `_budget_fallback_text` and logs a WARNING. The prompt already
+    says "don't invent amounts" and the 1B model ignores it often enough to
+    matter — observed: "approximately $1,200" against a stated $5,000, and
+    "$1,800-$2,200 per night for 3 nights … approximately $540-$720 total."
+    Same principle as `_is_grounded`: a code-level backstop for a failure a
+    prompt cannot prevent. Keep it if the model is upgraded; the WARNING
+    rate is how you measure whether a bigger model still needs it.
+  - `_find_duration_days` requires a number to sit adjacent to a duration
+    noun (day/night/week, with up to two intervening adjectives). A bare
+    digit scan read "Group of 4 going to Tokyo" as a 4-day trip — caught by
+    the eval as a hallucination. Note the pattern lists number words
+    explicitly and forbids them in the gap: with a generic `[a-z]+` token,
+    "I want a seven-day trip" matches at "want" and consumes the real
+    number before it can be read.
   - After generation, `review_plan` lets the user request further changes;
     `apply_plan_edit` re-extracts with a *merge-aware* edit prompt
     (`_EDIT_EXTRACTION_SYSTEM_PROMPT`, given current values as context, so
@@ -130,9 +201,43 @@ reserve the LLM for extraction/generation inside a node.
   `unsloth/Llama-3.2-1B-Instruct` in fp16 (`bitsandbytes` has no Metal/CPU
   backend), loaded via a pipeline built directly rather than
   `from_model_id(device=...)` (which only accepts legacy CUDA indices, not
-  device strings like `"mps"`).
+  device strings like `"mps"`). The checkpoint resolves as `model_id`
+  argument → `TRAVEL_ASSISTANT_MODEL` env var → per-device default, so the
+  eval harness can be pointed at a candidate model without a code change.
+- **`evals/`** — offline measurement of the *real* model, deliberately
+  separate from `tests/` (which must stay fast and GPU-free).
+  `extraction_cases.json` holds ~30 labelled utterances;
+  `extraction_eval.py` scores `_merge_extracted` against them per field as
+  hit / miss / wrong / **hallucination**. That last bucket is the point: a
+  `null` expectation is a real expectation, because inventing
+  `group_type="solo"` for a message that never said who is travelling is
+  worse than returning nothing — null asks a follow-up question, an
+  invented value silently reaches the itinerary, transport advice and
+  budget multiplier. It exists because everything in `graph.py` that
+  compensates for a small model (`_is_grounded`, `_infer_group_type`,
+  `_looks_like_specific_place`, the JSON truncation repair, the
+  normalizers) was previously unmeasured. `tests/test_extraction_eval.py`
+  covers the scorer itself with a stub model.
 - **`travel_assistant/app.py`** — Gradio `ChatInterface` wiring. Each
   browser session gets its own LangGraph thread (`uuid4` `thread_id`,
+  — continued below; three app-layer invariants found by running the demo:
+  (a) whether a message resumes or starts a conversation is decided by
+  `graph.get_state(config).next`, **not** a `started` flag — a flag stayed
+  True past END, so every later message hit `Command(resume=...)` on a
+  finished thread and replayed the old plan forever (Gradio's Clear button
+  has the same shape); a finished thread gets a fresh `thread_id`.
+  (b) the `plan_review` interrupt carries the plan itself (`PLAN_FIELDS`)
+  so the UI can render it — otherwise the user is asked to approve a plan
+  that was generated but never displayed. (c) `_describe_known` iterates
+  `DISPLAYED_FIELDS`, so a stated `budget_total_usd` is echoed back.
+  (d) the two `except` branches are deliberately asymmetric: an
+  `LLMInvocationError` keeps the thread (replaying the pending node *is*
+  the right retry for a transient backend failure), while a bare
+  `Exception` **abandons** it. LangGraph leaves the checkpoint pointing at
+  the node that raised, so a deterministic failure would otherwise send
+  every later message down the resume branch into the same exception —
+  trapping the session permanently while the reply told the user to
+  rephrase, which cannot help.
   persisted via `InMemorySaver`) so concurrent users don't cross-talk.
   Unlike the old fixed flow, the **first message is real content** — it's
   passed in as `last_user_input` (`graph.invoke({"last_user_input": message})`),
