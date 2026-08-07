@@ -1,9 +1,23 @@
-langgraph>=0.6
-langchain>=0.3
-langchain-huggingface>=0.1
-transformers>=4.44
-torch
-accelerate
-bitsandbytes; sys_platform == "linux"
-gradio>=4.44
-pytest>=8.0
+# Runtime dependencies.
+#
+# Upper bounds are deliberate. This project's behaviour is version-sensitive
+# in two places that have already bitten it: `HuggingFacePipeline` only reads
+# invoke-time generation overrides from a nested `pipeline_kwargs` dict, and
+# `from_model_id(device=...)` accepts a legacy CUDA index rather than a
+# device string (see travel_assistant/llm.py). An unpinned major bump would
+# change either silently. Bounds are set at the next major so patch and
+# minor upgrades still flow in.
+#
+# `torch` is intentionally left with only a lower bound: Colab ships its own
+# CUDA-matched build, and pinning it there causes a reinstall that breaks GPU
+# support. Versions verified against this set are recorded in the README.
+
+langgraph>=1.2,<2
+langchain>=1.3,<2
+langchain-core>=1.5,<2
+langchain-huggingface>=1.2,<2
+transformers>=5.14,<6
+torch>=2.6
+accelerate>=1.14,<2
+bitsandbytes>=0.43; sys_platform == "linux"
+gradio>=6.20,<7

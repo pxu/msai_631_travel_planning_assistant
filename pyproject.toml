@@ -1,0 +1,42 @@
+[project]
+name = "travel-assistant"
+version = "0.1.0"
+description = "AI-Powered Travel Assistant Planner (MSAI-631-B01, Group 4)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Fail on an unregistered marker rather than silently skipping the filter.
+addopts = "--strict-markers"
+# Put the repo root on sys.path so `travel_assistant` and `evals` import the
+# same way under bare `pytest` as under `python -m pytest`. Without this only
+# the latter works — `python -m` happens to prepend the CWD, the console
+# script does not — so CI running `pytest` would fail on an import error
+# that never reproduces locally.
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["notebooks", "docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    # Long prompt strings and explanatory comments are the point in this
+    # codebase; wrapping them at 100 columns hurts more than it helps.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately reach into private helpers (_merge_extracted,
+# _estimate_budget) — that is the unit under test, not an encapsulation leak.
+"tests/*" = ["E402"]

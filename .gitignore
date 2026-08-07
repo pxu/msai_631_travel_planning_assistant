@@ -5,3 +5,14 @@ __pycache__/
 .ipynb_checkpoints/
 .idea/
 .DS_Store
+
+# Browser-automation artifacts (console logs, page snapshots) written by
+# Playwright when the demo is driven end-to-end. Regenerated on every run.
+.playwright-mcp/
+
+# The rendered PDF lives at docs/detailed-design.pdf; keep only the HTML
+# source under docs/_build/ so the two can't drift out of sync.
+docs/_build/*.pdf
+
+# Ruff's cache.
+.ruff_cache/

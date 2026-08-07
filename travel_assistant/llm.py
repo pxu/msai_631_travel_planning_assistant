@@ -19,13 +19,31 @@ Two backends are supported:
   quantization needed given typical unified-memory headroom.
 """
 
+import logging
+import os
+
 import torch
 from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import pipeline as hf_pipeline
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_CUDA_MODEL_ID = "unsloth/Llama-3.2-1B-Instruct-bnb-4bit"
 DEFAULT_LOCAL_MODEL_ID = "unsloth/Llama-3.2-1B-Instruct"
+
+#: Override the model without touching code:
+#:
+#:     TRAVEL_ASSISTANT_MODEL=unsloth/Llama-3.2-3B-Instruct python -m travel_assistant.app
+#:     TRAVEL_ASSISTANT_MODEL=unsloth/Llama-3.2-3B-Instruct python -m evals.extraction_eval
+#:
+#: The 1B default is what the proposal specifies and what the architecture
+#: is designed around — routing stays in Python, the budget figure is
+#: computed deterministically, and extraction is backstopped in code — so a
+#: larger model is an upgrade, not a prerequisite. Point the eval harness at
+#: a candidate to see what it actually buys before adopting it; the tradeoff
+#: is download size, memory and latency per turn.
+MODEL_ENV_VAR = "TRAVEL_ASSISTANT_MODEL"
 
 
 def _pick_device() -> str:
@@ -43,12 +61,17 @@ def build_chat_model(
 ) -> ChatHuggingFace:
     """Load the local model and wrap it as a LangChain chat model.
 
-    Picks CUDA, then Apple Silicon MPS, then CPU automatically. Pass
-    ``model_id`` explicitly to override the per-device default.
+    Picks CUDA, then Apple Silicon MPS, then CPU automatically. Resolution
+    order for the checkpoint: the ``model_id`` argument, then the
+    ``TRAVEL_ASSISTANT_MODEL`` environment variable, then the per-device
+    default.
     """
     device = _pick_device()
     if model_id is None:
-        model_id = DEFAULT_CUDA_MODEL_ID if device == "cuda" else DEFAULT_LOCAL_MODEL_ID
+        model_id = os.environ.get(MODEL_ENV_VAR) or (
+            DEFAULT_CUDA_MODEL_ID if device == "cuda" else DEFAULT_LOCAL_MODEL_ID
+        )
+    logger.info("loading %s on %s", model_id, device)
 
     pipeline_kwargs = {
         "max_new_tokens": max_new_tokens,

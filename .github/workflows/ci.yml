@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        # CPU-only torch: the test suite uses a fake chat model and never
+        # loads the real one, so the CUDA wheels would be ~2.5GB of download
+        # for nothing. This only works because app.py builds the model
+        # lazily — importing it no longer pulls a 1B checkpoint.
+        #
+        # --index-url (not --extra-index-url) is what actually forces the
+        # CPU build. With --extra-index-url pip resolves across both
+        # indexes and picks PyPI's `torch`, which on Linux *is* the CUDA
+        # wheel — the flag would read as CPU-only while installing 2.5GB.
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Test
+        run: pytest -q
+
+      - name: Import the app without loading a model
+        # Regression guard for the import-time model load: if someone moves
+        # build_chat_model() back to module scope, this step starts
+        # downloading a checkpoint and the job times out.
+        run: python -c "import travel_assistant.app; print('ok')"

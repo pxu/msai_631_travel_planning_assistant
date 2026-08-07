@@ -1,0 +1,15 @@
+# Development-only dependencies. Not imported by the application — these
+# are the test and lint tools, kept out of requirements.txt so a Colab or
+# demo install doesn't pull them.
+#
+# `ruff` was a new dependency relative to the previous set. Per the team's
+# dependency policy it required tech-lead sign-off before being adopted in
+# CI — APPROVED 2026-08-07 by the project owner, who is the tech lead for
+# this course project. It is dev-only: nothing in travel_assistant/ or
+# evals/ imports it, so the application's runtime dependency set is
+# unchanged and the app still runs without it installed.
+
+-r requirements.txt
+
+pytest>=8.0,<10
+ruff>=0.14,<1

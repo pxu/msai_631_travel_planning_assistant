@@ -176,6 +176,23 @@ in plain Python, and the LLM only writes a short narrative around that
 number. This keeps the one field users are most likely to sanity-check (a
 total dollar amount) independent of the small model's arithmetic ability.
 
+A total the traveler states outright ("we have around $4000") overrides
+the rate table entirely. It is captured as an integer in its own state
+field, `budget_total_usd`, and returned verbatim by `_estimate_budget` —
+quoting a computed figure back at someone who just named their own budget
+is the wrong answer regardless of how good the rate table is.
+`validate_preferences` back-derives the `budget_level` tier from that
+total once trip length and group are known (`_derive_budget_level`), so
+stating a number doesn't also trigger a redundant question about tier.
+
+`budget_level` and `group_type` are **closed vocabularies**
+(`BUDGET_LEVELS` / `GROUP_TYPES` in `state.py`) because they index into
+those two tables. `_normalize_budget_level` / `_normalize_group_type` map
+free text onto them during extraction; anything unmappable becomes `None`,
+which returns the field to `missing_fields` so it is re-asked.
+`_estimate_budget` **raises** on an unrecognized value rather than
+defaulting — see §8.
+
 Each generation node's core logic is factored into a plain `_*_update(llm,
 state) -> dict` function (e.g. `_itinerary_update`), separate from the
 `_make_*_node(llm)` closure that wraps it for the graph. This split exists
@@ -229,31 +246,36 @@ class TravelState(TypedDict, total=False):
     last_user_input: Optional[str]
 
     # Collected from the traveler — required
-    destination: Optional[str]
-    trip_length_days: Optional[int]
-    group_type: Optional[str]
-    interests: Optional[str]
-    budget_level: Optional[str]
+    destination: str | None
+    trip_length_days: int | None
+    # Normalized to the closed vocabularies below; an unmappable value
+    # stays None so the gap analysis re-asks for it.
+    group_type: GroupType | None
+    interests: str | None
+    budget_level: BudgetLevel | None
 
     # Collected from the traveler — optional
-    travel_style: Optional[str]
-    travel_season: Optional[str]
-    must_visit_attractions: Optional[str]
+    travel_style: str | None
+    travel_season: str | None
+    must_visit_attractions: str | None
+
+    # A total the traveler stated outright; overrides the rate table.
+    budget_total_usd: int | None
 
     # Gap-analysis / conversation bookkeeping
-    collected_fields: Dict[str, str]
-    missing_fields: List[str]
+    collected_fields: dict[str, str]
+    missing_fields: list[str]
     conversation_stage: ConversationStage
-    confirmation_status: Optional[ConfirmationStatus]
+    confirmation_status: ConfirmationStatus | None
     extraction_attempts: int
-    regeneration_targets: Optional[List[str]]
+    regeneration_targets: list[str] | None
 
     # Produced by the generation nodes
-    itinerary: Optional[str]
-    activities: Optional[str]
-    transportation: Optional[str]
-    budget_estimate: Optional[str]
-    packing_list: Optional[str]
+    itinerary: str | None
+    activities: str | None
+    transportation: str | None
+    budget_estimate: str | None
+    packing_list: str | None
 ```
 
 `ConversationStage` is one of `"collecting"`, `"extracting"`,
@@ -494,9 +516,29 @@ agent. Additionally, as currently designed:
   below would reject even if the model got it right, since "family" never
   literally appears in "wife and son."; and if `budget_level` still comes
   back ungrounded (the model paraphrased an explicit dollar figure into a
-  category, e.g. "$4000" -> "mid-range"), `_find_dollar_amount` prefers a
-  literal `$`-prefixed amount found in the message over any category the
-  model invented.
+  category, e.g. "$4000" -> "mid-range"), `_find_dollar_amount` captures the
+  literal amount into `budget_total_usd`, which `_estimate_budget` then uses
+  verbatim.
+- Synonym tables are matched on **word boundaries**, not substrings. Plain
+  `in` matching was a live defect found in review: `"mid"` fired inside
+  *pyramids* and `"low"` inside *flower*, so "a 7-day trip to Egypt to see
+  the pyramids" silently acquired a `moderate` budget the user never
+  stated — and because the field then looked filled, the gap analysis never
+  asked, and the trip was costed at the invented rate. The raw-message scan
+  additionally uses a stricter vocabulary than the model's own answer
+  (`_AMBIGUOUS_IN_FREE_TEXT`): "mid September" is a date and "low season" is
+  a season, so those words only denote a tier when the model is answering
+  that specific field.
+- `_find_dollar_amount` rejects per-unit **rates** ("$200 a night", "$800
+  each", "$150 per person") and parses magnitude suffixes ("$4.5k" → 4500).
+  Because a stated total is returned verbatim by `_estimate_budget`,
+  mistaking a nightly rate for the total would cap a seven-day family trip
+  at $200; declining and falling back to the rate table is the safe
+  direction to fail in.
+- `_coerce_trip_length` runs a model-returned *string* through
+  `_find_duration_days` before `_find_number`, so an answer of `"2 weeks"`
+  yields 14 rather than 2 — a failure that appeared precisely when the model
+  got the field right.
 - `_extract_json` tolerates a response that got cut off mid-object — a
   small model generating a long field list not infrequently stops before
   emitting the closing `}`. Rather than requiring the regex `\{.*\}` to
@@ -531,11 +573,32 @@ agent. Additionally, as currently designed:
   override the model's (possibly stale) returned value — the edit text is
   a deliberate statement about who's traveling, so a keyword match in it
   is trusted over an LLM value that didn't change.
-- Preference answers beyond `trip_length_days` are taken at face value —
-  there is no validation that, e.g., `budget_level` is one of
-  budget/moderate/luxury; an out-of-vocabulary value still gets accepted
-  and defaults to the "moderate" rate in the deterministic budget
-  calculation (`_estimate_budget`).
+- `budget_level` and `group_type` are validated against closed
+  vocabularies at extraction time; an unmappable value becomes `None` and
+  is re-asked. This replaced a silent-default bug: `budget_level` was free
+  text, so "mid-range", "$4000" and "zzz" all fell through
+  `_DAILY_RATE_BY_BUDGET.get(key, 175)` and produced an identical,
+  confident, wrong figure with nothing in the output to signal it.
+  `_estimate_budget` now raises `ValueError` on an unrecognized value —
+  by the time generation runs, every input is required and normalized, so
+  an unexpected one is a pipeline bug, not user error, and must not be
+  papered over with a plausible number. `app.respond()` catches it and
+  shows a usable message rather than a traceback — and **abandons the
+  thread**. That last part matters: LangGraph leaves the checkpoint pointing
+  at the node that raised, so a deterministic failure would otherwise send
+  every subsequent message down the resume branch into the same exception,
+  trapping the session permanently. The `LLMInvocationError` branch is
+  deliberately the opposite — it keeps the thread, because replaying the
+  pending node *is* the correct retry for a transient backend failure and
+  discarding the user's collected preferences would be worse than the error.
+- The remaining free-text preference fields (`destination`, `interests`,
+  `travel_style`, `travel_season`, `must_visit_attractions`) are taken at
+  face value — they feed prompts rather than lookup tables, so there is no
+  vocabulary to validate against.
+- Extraction quality against the real model is measured, not assumed —
+  see `evals/` and the baseline table in the README (95.2 % field
+  accuracy, 0 % hallucination rate over 33 labelled utterances). The unit
+  tests use a fake model and deliberately say nothing about it.
 - There's no way to jump back into mid-collection editing before the
   summary is reached short of continuing to answer — but the summary and
   post-generation review stages both fully support corrections.
